@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "mcp-ssh-manager": {
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/src/index.js"]
+      "command": "bash",
+      "args": ["${PLUGIN_ROOT}/start.sh"]
     }
   }
 }
