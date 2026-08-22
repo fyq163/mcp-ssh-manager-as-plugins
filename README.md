@@ -1,4 +1,4 @@
-# mcp-ssh-manager-plugin
+# mcp-ssh-manager
 
 A ChatGPT / Codex plugin that:
 
@@ -31,7 +31,7 @@ skills/use-ssh-manager/SKILL.md  # skill teaching the agent to use the MCP serve
   be tuned from the Codex config without editing the plugin:
 
   ```toml
-  [plugins."mcp-ssh-manager-plugin".mcp_servers."mcp-ssh-manager"]
+  [plugins."mcp-ssh-manager".mcp_servers."mcp-ssh-manager"]
   enabled = true
   default_tools_approval_mode = "prompt"
   ```
@@ -39,7 +39,7 @@ skills/use-ssh-manager/SKILL.md  # skill teaching the agent to use the MCP serve
 ## Local install & test (repo marketplace)
 
 1. Make sure the marketplace file exists at
-   `clashprofile_backup/.agents/plugins/marketplace.json` and points at this
+    `.agents/plugins/marketplace.json` and points at this
    plugin (see that file for the `source.path`).
 2. Restart the ChatGPT desktop app (or use Codex CLI).
 3. Open the Plugins Directory, pick the local marketplace, install
