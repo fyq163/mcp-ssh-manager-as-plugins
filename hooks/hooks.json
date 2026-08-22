@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${PLUGIN_ROOT}\" && test -d node_modules || npm install --omit=dev",
+            "statusMessage": "Installing mcp-ssh-manager dependencies"
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [

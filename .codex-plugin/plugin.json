@@ -12,6 +12,7 @@
   "keywords": ["mcp", "ssh", "mcp-server", "claude-code", "codex", "devops", "remote"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "MCP SSH Manager",
     "shortDescription": "SSH remote management via MCP (37 tools)",
