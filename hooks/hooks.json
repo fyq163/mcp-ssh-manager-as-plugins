@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/prompt_mcp_ssh.py",
+            "statusMessage": "Reminding to use mcp-ssh-manager"
+          }
+        ]
+      }
+    ]
+  }
+}
