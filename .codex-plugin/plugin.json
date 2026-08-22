@@ -1,8 +1,28 @@
 {
   "name": "mcp-ssh-manager",
   "version": "3.8.0",
-  "description": "SSH remote-server management over MCP for Claude Code / Codex (commands, file transfer, DB, backups, health).",
-  "author": "fyq",
+  "description": "MCP SSH Manager: control SSH connections from Claude Code & OpenAI Codex - exec, file transfer, DB ops, backups, health monitoring (37 tools).",
+  "author": {
+    "name": "fyq163",
+    "url": "https://github.com/fyq163"
+  },
+  "homepage": "https://github.com/fyq163/mcp-ssh-manager-as-plugins",
+  "repository": "https://github.com/fyq163/mcp-ssh-manager-as-plugins",
+  "license": "MIT",
+  "keywords": ["mcp", "ssh", "mcp-server", "claude-code", "codex", "devops", "remote"],
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "MCP SSH Manager",
+    "shortDescription": "SSH remote management via MCP (37 tools)",
+    "longDescription": "Bundle reusable skill + MCP server for SSH remote management. One skill (use-ssh-manager) + one MCP server (mcp-ssh-manager) with 37 tools: exec, upload/download, deploy, sync, tunnels, sessions, groups, backups, DB (MySQL/PostgreSQL/MongoDB), health & monitoring. Works with Claude Code & Codex.",
+    "developerName": "fyq163",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/fyq163/mcp-ssh-manager-as-plugins",
+    "defaultPrompt": [
+      "Use MCP SSH Manager to run a command on my remote server.",
+      "Use MCP SSH Manager to deploy files and check health."
+    ]
+  }
 }
