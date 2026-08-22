@@ -1,0 +1,12 @@
+{
+  "name": "mcp-ssh-manager-plugin",
+  "version": "1.0.0",
+  "description": "SSH Manager reminder hooks + bundled MCP server. /ssh-on [target] and /ssh-off toggle ssh-mode; when on, SessionStart/PostCompact/SubagentStart remind the model to prefer the SSH Manager MCP (ssh_* tools).",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "SSH Manager Reminder",
+    "shortDescription": "Remind to use SSH Manager MCP when ssh-mode is on",
+    "category": "Productivity"
+  }
+}

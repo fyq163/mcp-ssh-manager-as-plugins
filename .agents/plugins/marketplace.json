@@ -1,0 +1,20 @@
+{
+  "name": "local-clashprofile-plugins",
+  "interface": {
+    "displayName": "Clashprofile Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "mcp-ssh-manager-plugin",
+      "source": {
+        "source": "local",
+        "path": "./plugins/mcp-ssh-manager-plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

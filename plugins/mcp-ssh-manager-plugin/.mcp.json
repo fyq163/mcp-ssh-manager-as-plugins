@@ -1,0 +1,9 @@
+{
+  "mcp_servers": {
+    "mcp-ssh-manager": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/../../src/index.js"],
+      "startup_timeout_ms": 20000
+    }
+  }
+}
