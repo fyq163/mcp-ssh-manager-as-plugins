@@ -10,6 +10,7 @@ This hook is intentionally read-only and never fails the turn: it always exits
 0 so the user's prompt proceeds normally.
 """
 
+import json
 import os
 import sys
 
@@ -22,8 +23,10 @@ def main() -> int:
         "transfer, log pull, tunnel, or host/session management), prefer the "
         "bundled `mcp-ssh-manager` MCP server's tools over a raw shell `ssh`."
     )
-    # Printed to stdout; Codex/Claude surfaces it in the turn context / logs.
-    print(reminder)
+    # UserPromptSubmit hooks must return valid JSON. Plain text is rejected
+    # as "invalid user prompt submit JSON output". Emit hookSpecificOutput.
+    payload = {"hookSpecificOutput": {"additionalContext": reminder}}
+    print(json.dumps(payload))
     if plugin_root:
         print(f"[mcp-ssh-manager] plugin root: {plugin_root}", file=sys.stderr)
     return 0

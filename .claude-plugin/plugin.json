@@ -1,0 +1,32 @@
+{
+  "name": "mcp-ssh-manager",
+  "version": "3.8.0",
+  "description": "SSH remote-server management over MCP for Claude Code / Codex (37 tools: exec, transfer, DB, backups, health monitoring).",
+  "author": {
+    "name": "fyq163",
+    "url": "https://github.com/fyq163"
+  },
+  "homepage": "https://github.com/fyq163/mcp-ssh-manager-as-plugins",
+  "license": "MIT",
+  "keywords": ["mcp", "ssh", "mcp-server", "claude-code", "codex", "devops", "remote"],
+  "skills": "./skills/",
+  "mcpServers": {
+    "mcp-ssh-manager": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/src/index.js"]
+    }
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/prompt_mcp_ssh.py",
+            "statusMessage": "Reminding to use mcp-ssh-manager"
+          }
+        ]
+      }
+    ]
+  }
+}
