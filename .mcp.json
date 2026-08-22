@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mcp-ssh-manager": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/src/index.js"]
+    }
+  }
+}
