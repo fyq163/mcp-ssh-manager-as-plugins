@@ -1,0 +1,8 @@
+{
+  "name": "mcp-ssh-manager",
+  "version": "3.8.0",
+  "description": "SSH remote-server management over MCP for Claude Code / Codex (commands, file transfer, DB, backups, health).",
+  "author": "fyq",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
