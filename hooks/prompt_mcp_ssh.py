@@ -23,9 +23,15 @@ def main() -> int:
         "transfer, log pull, tunnel, or host/session management), prefer the "
         "bundled `mcp-ssh-manager` MCP server's tools over a raw shell `ssh`."
     )
-    # UserPromptSubmit hooks must return valid JSON. Plain text is rejected
-    # as "invalid user prompt submit JSON output". Emit hookSpecificOutput.
-    payload = {"hookSpecificOutput": {"additionalContext": reminder}}
+    # UserPromptSubmit hooks must return valid JSON. Codex schema (codex-rs/hooks/src/schema.rs)
+    # requires hookSpecificOutput.hookEventName == "UserPromptSubmit" (deny_unknown_fields).
+    # Claude also reads hookSpecificOutput.additionalContext. Emit both-compatible payload.
+    payload = {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": reminder,
+        }
+    }
     print(json.dumps(payload))
     if plugin_root:
         print(f"[mcp-ssh-manager] plugin root: {plugin_root}", file=sys.stderr)
