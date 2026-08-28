@@ -5,6 +5,61 @@ All notable changes to MCP SSH Manager will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.3] - 2026-08-28
+
+### Changed
+
+- **First release published from CI with build provenance and an attested SBOM.** 3.8.2 shipped the workflow but was still published by hand, so it carried no attestation — `npm audit signatures` found none for it, while the comparable competitor had both an npm publish attestation and SLSA provenance. This release closes that gap for real: anyone can now verify which commit and which workflow built the tarball.
+- **`zod` 3 → 4** ([#65](https://github.com/bvisible/mcp-ssh-manager/pull/65)). Verified before merging rather than after: with zod 4 installed, all 37 tools still register over a real MCP stdio handshake, and the full suite, typecheck and lint stay green. `@modelcontextprotocol/sdk` accepts `^3.25 || ^4.0`, and knip already wanted `^4.1.11`.
+- `actions/checkout` and `actions/setup-node` bumped to v7 ([#61](https://github.com/bvisible/mcp-ssh-manager/pull/61), [#62](https://github.com/bvisible/mcp-ssh-manager/pull/62)).
+
+### Note
+
+TypeScript 7 ([#64](https://github.com/bvisible/mcp-ssh-manager/issues/64)) and ESLint 10 ([#63](https://github.com/bvisible/mcp-ssh-manager/issues/63)) were declined, not deferred by accident: knip 5 pins `peer typescript ">=5.0.4 <7"`, and ESLint 9+ requires migrating off `.eslintrc` to flat config — tracked in [#66](https://github.com/bvisible/mcp-ssh-manager/issues/66).
+
+## [3.8.2] - 2026-08-28
+
+### Security
+
+- **The sudo password no longer reaches the remote command line** ([#34](https://github.com/bvisible/mcp-ssh-manager/issues/34)). `ssh_execute_sudo` and the three privileged steps of `ssh_deploy` built `echo "<password>" | sudo -S <cmd>`, which published the password to the remote process list, `/proc/<pid>/cmdline` and any `auditd` trail for the lifetime of the `echo` — readable by every account on the host. The existing output masking never helped: it only redacted the copy sent back to the agent. The password now travels on the SSH exec channel's stdin (`sudo -S -k -p ''`), where no other process can observe it. `-k` is required: without it an already-authorised sudo skips the prompt, leaving the password in the pipe for the command itself to read as input. Guarded by `npm run test:sudostdin`, which also fails if the old pipeline reappears anywhere in `src/`.
+
+### Added
+
+- **`server.json`** — the manifest for the official [MCP Registry](https://registry.modelcontextprotocol.io), published as `io.github.bvisible/mcp-ssh-manager`, plus the `mcpName` field in `package.json` that proves package ownership. The registry is what feeds MCP clients today; the project was absent from it.
+- **OpenSSF Scorecard workflow and badge** — a public grade of the repository's supply-chain posture. For a server that hands an agent a shell on production machines, that grade is part of the product.
+- **`Release` workflow** publishing to npm with build provenance and attaching a CycloneDX SBOM to each GitHub release. Removes the hand-publish step that failed twice on 2026-08-28 (expired token, then a 2FA prompt), and lets anyone verify the tarball's origin with `npm audit signatures`.
+- **README section "Giving an agent SSH access, safely"** documenting the per-server `unrestricted` / `readonly` / `restricted` modes, which existed since v3.5.0 but were never surfaced where readers land.
+
+### Fixed
+
+- `SSHManager.execCommand` accepts an `stdin` option, written to the exec channel and then closed. Commands that pass no stdin are untouched, so interactive remote processes keep working.
+
+## [3.8.1] - 2026-08-28
+
+### Added
+
+- **`package-lock.json` is now committed** (contributed by @cudatuda in #60) — installs are reproducible, `npm ci` works, and the transitive tree is auditable. npm excludes lockfiles from published tarballs, so consumers of the package are unaffected.
+- **`npm run test:lockfile`** (`tests/test-lockfile.js`, wired into `npm test`) — guards the lockfile against the ways it rots: version drift between `package.json` and the lockfile's two version fields, dependency ranges out of sync, a locked version outside its declared range, packages resolved from anywhere but registry.npmjs.org, missing integrity hashes, `file:`/`git+`/`link:` entries, unreviewed install scripts, and runtime dependencies requiring a newer Node than `engines.node` advertises.
+- **Node 22.x added to the CI test matrix** — `engines` claims `>=18` and 22 is the active LTS.
+- **`.github/dependabot.yml`** — a pinned tree stops receiving upstream fixes on its own, so monthly grouped dependency updates (capped at 3 open PRs) act as the counterweight. GitHub Actions versions are tracked too.
+- **Advisory `npm audit --omit=dev --audit-level=high` step** in the `Code Quality` workflow. Not a required check: a CVE published against a transitive dependency should be visible without blocking unrelated merges.
+
+### Changed
+
+- **CI installs with `npm ci` instead of `npm install`** in both workflows. `npm ci` reproduces the locked tree exactly and aborts if `package.json` and the lockfile have drifted.
+- **ESLint and the JSDoc typecheck are now blocking**, and moved into the `lint` job — one of the three required status checks on `main`. They previously lived in the advisory `Code Quality` workflow, where ESLint additionally ran with `continue-on-error: true`, so neither gate could ever fail a pull request.
+- **Node module caching now works.** `Code Quality` keyed its cache on `hashFiles('**/package-lock.json')` while the lockfile was gitignored, so every run shared one degenerate key. Replaced by `actions/setup-node@v4`'s built-in `cache: 'npm'`.
+- GitHub Actions bumped from `actions/checkout@v3` / `actions/setup-node@v3` / `actions/cache@v3` to v4.
+
+### Removed
+
+- **`npm install --save-dev eslint prettier` from the `Code Quality` workflow** — it re-resolved both packages to their latest majors on every run (ESLint 9 over the pinned `^8.56.0`) and rewrote `package.json` in the CI workspace, defeating the pinning it ran next to.
+- Redundant CI steps re-running `test-profiles.js`, `test-command-aliases.js` and `test-hooks.js` individually after `npm test` had already run them.
+
+### Fixed
+
+- `mcp-ssh-manager-setup.md`: the two `.gitignore` templates no longer tell readers to ignore `package-lock.json`.
+
 ## [3.8.0] - 2026-08-14
 
 ### Security

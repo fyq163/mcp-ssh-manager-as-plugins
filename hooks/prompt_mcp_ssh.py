@@ -14,6 +14,7 @@ Read-only and never fails the call: it always exits 0 so the command proceeds.
 
 import json
 import os
+import shlex
 import sys
 
 
@@ -34,8 +35,17 @@ def main() -> int:
     except Exception:
         return 0
 
-    # Only remind for a raw ssh invocation, not when already using the ssh tools.
-    if "ssh" not in command.lower():
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return 0
+    command_starts = [0]
+    command_starts.extend(i + 1 for i, token in enumerate(tokens) if token in {";", "&&", "||", "|", "&"})
+    if not any(
+        0 <= index < len(tokens)
+        and (tokens[index] == "ssh" or tokens[index].endswith("/ssh"))
+        for index in command_starts
+    ):
         return 0
 
     reminder = (
