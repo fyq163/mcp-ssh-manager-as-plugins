@@ -11,6 +11,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Log levels
+/**
+ * Log level constants. Exported as part of the package's public surface so a
+ * consumer can map SSH_LOG_LEVEL values; nothing inside the repository imports
+ * it, hence the @public tag telling knip this export is deliberate.
+ * @public
+ */
 export const LOG_LEVELS = {
   DEBUG: 0,
   INFO: 1,
@@ -34,6 +40,34 @@ const ICONS = {
   WARN: '⚠️',
   ERROR: '❌'
 };
+
+// Field names whose values must never be written to a log, matched
+// case-insensitively against the whole key (so `sudoPassword`, `SSH_PASSWORD`
+// and `passphrase` are all caught).
+const SECRET_KEY_PATTERN = /(pass(word|phrase)?|secret|token|credential|privatekey|private_key|apikey|api_key|auth)/i;
+const REDACTED = '[redacted]';
+
+/**
+ * Deep-copy a value with the value of any secret-looking key replaced.
+ * Cycles are broken so a self-referencing object cannot hang the logger.
+ * @param {any} value - Value to redact
+ * @param {WeakSet<object>} [seen] - Objects already visited on this path
+ * @returns {any} A redacted copy safe to serialise
+ */
+function redactSecrets(value, seen = new WeakSet()) {
+  if (value === null || typeof value !== 'object') return value;
+  if (seen.has(value)) return '[circular]';
+  seen.add(value);
+
+  if (Array.isArray(value)) return value.map(item => redactSecrets(item, seen));
+
+  /** @type {Record<string, any>} */
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    out[key] = SECRET_KEY_PATTERN.test(key) ? REDACTED : redactSecrets(item, seen);
+  }
+  return out;
+}
 
 class Logger {
   constructor() {
@@ -109,10 +143,15 @@ class Logger {
     // File format without colors
     const fileFormat = `[${timestamp}] [${levelName}] ${message}`;
 
-    // Add data if present
+    // Add data if present, with secrets redacted first. This is deliberately
+    // done here rather than at each call site: a logger for an SSH manager will
+    // eventually be handed a whole server config, and one forgotten call would
+    // write a production password to ~/.ssh-manager.log and to stderr, where
+    // the MCP host captures it. Redacting structurally means no call site can
+    // leak one.
     let dataStr = '';
     if (Object.keys(data).length > 0) {
-      dataStr = '\n  ' + JSON.stringify(data, null, 2).replace(/\n/g, '\n  ');
+      dataStr = '\n  ' + JSON.stringify(redactSecrets(data), null, 2).replace(/\n/g, '\n  ');
     }
 
     return {

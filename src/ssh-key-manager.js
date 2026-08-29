@@ -154,9 +154,14 @@ export function removeHostKey(host, port = 22) {
  */
 export async function addHostKey(host, port = 22, keyData = null) {
   try {
-    // Backup current known_hosts
-    if (fs.existsSync(KNOWN_HOSTS_PATH)) {
+    // Backup current known_hosts. Copy first and treat "not there" as nothing
+    // to back up, rather than checking then copying: between the two calls the
+    // file can be replaced, and the check adds a race without preventing the
+    // failure it appears to guard against.
+    try {
       fs.copyFileSync(KNOWN_HOSTS_PATH, KNOWN_HOSTS_BACKUP);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
     }
 
     // If no key data provided, fetch it
@@ -168,11 +173,11 @@ export async function addHostKey(host, port = 22, keyData = null) {
       keyData = fingerprints.map(fp => fp.fullKey).join('\n');
     }
 
-    // Ensure .ssh directory exists
+    // Ensure .ssh directory exists. No existsSync guard: mkdirSync with
+    // recursive:true is already a no-op on an existing directory, and checking
+    // first only opens a window where the directory can change underneath us.
     const sshDir = path.dirname(KNOWN_HOSTS_PATH);
-    if (!fs.existsSync(sshDir)) {
-      fs.mkdirSync(sshDir, { mode: 0o700, recursive: true });
-    }
+    fs.mkdirSync(sshDir, { mode: 0o700, recursive: true });
 
     // Append to known_hosts
     fs.appendFileSync(KNOWN_HOSTS_PATH, keyData + '\n');

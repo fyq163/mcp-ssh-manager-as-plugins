@@ -5,6 +5,41 @@ All notable changes to MCP SSH Manager will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.5] - 2026-08-28
+
+### Security
+
+Three reported advisories, all the same class of bug, all confirmed present in 3.8.4 and fixed here. The v3.6.7 fix (CVE-2026-77383) introduced `shellQuote()` but applied it to `src/database-manager.js` only; the parallel builders for backups and monitoring were never covered.
+
+- **RCE through every `ssh_backup_*` builder** (GHSA-qwwm-vrm9-4mw8, high). `src/backup-manager.js` concatenated `database`, `dbUser`, `dbPassword`, `dbHost`, `backupDir`, `paths` and `exclude` into shell strings with no escaping — 0 uses of `shellQuote` across 9 builders. Arbitrary command execution as the SSH user on every managed server.
+- **RCE through `ssh_db_dump` and the MongoDB backup path** (GHSA-796j-h5q5-jx6p, critical). The follow-up `stat` command interpolated `outputFile` raw, after the dump itself had been fixed — the earlier patch stopped one line short.
+- **RCE bypassing readonly/restricted mode** (GHSA-m793-whw6-f537, critical). `ssh_service_status` and `ssh_tail` are read-only, so they stay enabled on servers the operator locked down — and neither quoted its arguments nor consulted the policy layer. `buildServiceStatusCommand` interpolated the service name unquoted six times; `ssh_tail` built `tail -n ${lines} "${file}" | grep "${grep}"` with double quotes only, so a `"` breakout ran. **This defeated the exact control those modes exist to provide**, and the README had just started advertising them.
+
+Fixes: `shellQuote()` extracted to `src/shell-quote.js` and applied across `backup-manager.js` (54 call sites), `health-monitor.js` and the remaining inline commands in `index.js`; a `safeInteger()` helper for numeric arguments that still land in command strings; `buildProcessInfoCommand` now validates its PID like `buildKillProcessCommand` always did; and `ssh_tail` and `ssh_service_status` now call the policy layer.
+
+Guarded by `npm run test:backupinjection`: **340 builder × argument × payload combinations** driven through a real `/bin/sh` with a canary file, asserting no payload ever executes. Verified by mutation — removing any single quote-call is caught.
+
+**Upgrade if you use `ssh_backup_*`, `ssh_db_dump`, `ssh_service_status` or `ssh_tail`, and especially if you rely on `readonly` or `restricted` mode.**
+
+## [3.8.4] - 2026-08-28
+
+### Security
+
+- **The logger no longer writes secrets in clear text** (CodeQL `js/clear-text-logging`, `src/logger.js`). Structured log data is now redacted inside the logger rather than at each call site: any key matching password / passphrase / secret / token / credential / private key / api key / auth becomes `[redacted]`, at any depth, in arrays, whatever the casing. This matters because the logger writes to **two** places outside our control — `~/.ssh-manager.log` and stderr, which the MCP host captures — so one forgotten call site handing over a whole server config would have persisted a production password. Cyclic objects are marked rather than followed, so a self-referencing config cannot hang a log call. Guarded by `npm run test:redaction`.
+
+### Fixed
+
+- **`examples/backup-workflow.js` did not parse at all**, and is now `examples/backup-workflow.md`. A cron expression (`*/6`) inside a `/* */` block closed the comment early. Repairing it exposed the deeper problem CodeQL then found (`js/call-to-non-callable`): the file called `createBackup(...)`, a function that does not exist anywhere — it was never a JavaScript API, but documentation of conversations with the agent, where the real operations are MCP tools (`ssh_backup_create`, …). Shipping it as executable `.js` in the npm tarball invited people to run something that could only throw. It is now Markdown, which is what it always was, with the illustrative nature stated at the top.
+- **`scripts/validate.sh` now syntax-checks every tracked `.js` file** (49 instead of 2), which is how the above escaped for so long. The guard is itself verified by deliberately breaking a file.
+- Two time-of-check/time-of-use races (CodeQL `js/file-system-race`): `ssh-key-manager.js` guarded `mkdirSync({recursive:true})` with an `existsSync` that was both redundant and racy, and `config-loader.js` checked for the Codex config before reading it instead of reading it and handling `ENOENT`.
+
+### Changed
+
+- **Every GitHub action is pinned to a commit SHA**, including `trufflesecurity/trufflehog`, which tracked the moving `main` branch inside a workflow that reads the whole repository. This closes 17 of the 22 findings OpenSSF Scorecard reported.
+- **CodeQL analysis added** (`security-and-quality`), answering Scorecard's SAST finding. It paid for itself immediately: every fix in this entry came out of its first run.
+- **Dependabot alerts and automated security fixes enabled** on the repository — they were switched off.
+- The `Release` workflow is re-runnable: it skips publishing when the version is already on the registry instead of failing on a duplicate, and creates the GitHub release if the SBOM step finds none.
+
 ## [3.8.3] - 2026-08-28
 
 ### Changed

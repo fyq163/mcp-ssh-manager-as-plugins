@@ -10,7 +10,7 @@ only reminds you to use `mcp-ssh-manager` when the command is an actual raw
 
 [![npm version](https://img.shields.io/npm/v/mcp-ssh-manager.svg?style=for-the-badge&logo=npm)](https://www.npmjs.com/package/mcp-ssh-manager)
 [![npm downloads](https://img.shields.io/npm/dt/mcp-ssh-manager.svg?style=for-the-badge&logo=npm)](https://www.npmjs.com/package/mcp-ssh-manager)
-[![Version](https://img.shields.io/badge/Version-3.8.3-brightgreen?style=for-the-badge)](https://github.com/bvisible/mcp-ssh-manager/releases/tag/v3.8.3)
+[![Version](https://img.shields.io/badge/Version-3.8.5-brightgreen?style=for-the-badge)](https://github.com/bvisible/mcp-ssh-manager/releases/tag/v3.8.5)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-Compatible-5A67D8?style=for-the-badge&logo=anthropic)](https://claude.ai/code)
 [![OpenAI Codex](https://img.shields.io/badge/OpenAI_Codex-Compatible-00A67E?style=for-the-badge&logo=openai)](https://openai.com/codex)
 [![MCP](https://img.shields.io/badge/MCP-Server-orange?style=for-the-badge)](https://modelcontextprotocol.io)
@@ -27,16 +27,19 @@ only reminds you to use `mcp-ssh-manager` when the command is an actual raw
 
 ---
 
-## 🎉 What's New in v3.8.2
+## 🎉 What's New in v3.8.5
 
-**🔐 The sudo password stops leaking to the remote process list, and the server joins the official MCP Registry** (Released: August 28, 2026)
+**🔒 Security release — three command-injection advisories fixed, one of which defeated `readonly` mode** (Released: August 28, 2026)
 
-- **🔒 Security fix: the sudo password no longer reaches the remote command line** ([#34](https://github.com/bvisible/mcp-ssh-manager/issues/34)) — `ssh_execute_sudo` and `ssh_deploy` built `echo "<password>" | sudo -S …`, leaving the password visible in `ps` and `/proc/<pid>/cmdline` to every account on the host. It now travels on the SSH channel's stdin, where nothing else can read it. A regression test fails if the old pattern comes back anywhere in `src/`.
-- **📖 Listed in the official MCP Registry** as `io.github.bvisible/mcp-ssh-manager` — the registry that feeds MCP clients. The project was simply absent from it.
-- **🛡️ OpenSSF Scorecard + signed provenance + SBOM** — releases now publish from CI with build provenance you can check via `npm audit signatures`, and each one carries a CycloneDX SBOM.
-- **📋 The security modes are finally documented where people land** — `readonly` and `restricted` have existed since v3.5.0 and were buried. See the section right below.
+**Upgrade if you use `ssh_backup_*`, `ssh_db_dump`, `ssh_service_status` or `ssh_tail` — and especially if you rely on the `readonly` / `restricted` security modes.**
 
-[Read full changelog →](CHANGELOG.md#382---2026-08-28)
+- **🔴 RCE bypassing `readonly` / `restricted`** (GHSA-m793-whw6-f537) — `ssh_service_status` and `ssh_tail` are read-only, so they stay enabled on servers you locked down, and neither quoted its arguments nor consulted the policy layer. A service name like `nginx; id > /tmp/pwned` executed. This defeated the exact control those modes exist to provide.
+- **🔴 RCE through `ssh_db_dump`** (GHSA-796j-h5q5-jx6p) — the `stat` command run after the dump interpolated the output path raw. The v3.6.7 patch had stopped one line short.
+- **🟠 RCE through every `ssh_backup_*` tool** (GHSA-qwwm-vrm9-4mw8) — `backup-manager.js` had **zero** shell escaping across its 9 builders, while `database-manager.js` had 95. The v3.6.7 fix was never extended to it.
+
+The quoting helper now lives in one module (`src/shell-quote.js`) so "did this builder quote its inputs?" has a single answer, and a new test drives **340 builder × argument × payload combinations** through a real shell to prove none of them execute.
+
+[Read full changelog →](CHANGELOG.md#385---2026-08-28)
 
 ---
 
@@ -79,7 +82,15 @@ Alongside that:
 ## Previous Releases
 
 <details>
-<summary><b>📜 Release history — v3.8.1 down to v1.0.0</b> (click to expand)</summary>
+<summary><b>📜 Release history — v3.8.4 down to v1.0.0</b> (click to expand)</summary>
+
+### v3.8.4 - Secrets stop reaching the log, CodeQL on every commit (August 28, 2026)
+
+- **🔒 The logger no longer writes secrets in clear text** — it writes to `~/.ssh-manager.log` and stderr (which your MCP host captures), so one call site handing it a server config would have persisted a production password. Redaction now happens inside the logger. Also: CodeQL on every push, every action pinned by SHA, and a broken example that never parsed. [Full changelog →](CHANGELOG.md#384---2026-08-28)
+
+### v3.8.2 / v3.8.3 - Sudo password leak fixed, MCP Registry, signed releases (August 28, 2026)
+
+- **🔒 The sudo password no longer reaches the remote command line** ([#34](https://github.com/bvisible/mcp-ssh-manager/issues/34)) — it travelled through `echo "<password>" | sudo -S`, readable in `ps` and `/proc/<pid>/cmdline` by every account on the host. It now goes over the SSH channel's stdin. Also: listed in the **official MCP Registry** as `io.github.bvisible/mcp-ssh-manager`, releases published from CI with **SLSA provenance** and a CycloneDX SBOM, and the per-server security modes documented at last. [Full changelog →](CHANGELOG.md#383---2026-08-28)
 
 ### v3.8.1 - Reproducible installs and blocking quality gates (August 28, 2026)
 
@@ -1058,7 +1069,7 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for complete guide.
 "Backup website files excluding cache and logs"
 ```
 
-For detailed backup examples, see [examples/backup-workflow.js](examples/backup-workflow.js) and [docs/BACKUP_GUIDE.md](docs/BACKUP_GUIDE.md).
+For detailed backup examples, see [examples/backup-workflow.md](examples/backup-workflow.md) and [docs/BACKUP_GUIDE.md](docs/BACKUP_GUIDE.md).
 
 ### Using the Bash CLI
 
