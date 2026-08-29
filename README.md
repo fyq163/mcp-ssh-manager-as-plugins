@@ -2,6 +2,10 @@
 
 A Model Context Protocol (MCP) server that enables **Claude Code** and **OpenAI Codex** to manage multiple SSH connections. Execute commands, transfer files, manage databases, create backups, monitor health, and automate DevOps tasks across your servers — directly from your AI assistant.
 
+When installed as a Codex plugin, its reminder hook runs before `Bash` calls and
+only reminds you to use `mcp-ssh-manager` when the command is an actual raw
+`ssh` invocation. MCP tool calls and unrelated shell commands do not trigger it.
+
 <div align="center">
 
 [![npm version](https://img.shields.io/npm/v/mcp-ssh-manager.svg?style=for-the-badge&logo=npm)](https://www.npmjs.com/package/mcp-ssh-manager)
