@@ -82,8 +82,14 @@ try {
 // Test 5: Switch profiles
 console.log('Test 5: Switch profiles');
 const testProfileFile = path.join(__dirname, '..', '.ssh-manager-profile');
-const originalProfile = fs.existsSync(testProfileFile) ? 
-  fs.readFileSync(testProfileFile, 'utf8').trim() : null;
+// Read first and treat a missing file as "no profile set", rather than
+// checking then reading: the file can change between the two calls.
+let originalProfile = null;
+try {
+  originalProfile = fs.readFileSync(testProfileFile, 'utf8').trim();
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
 
 try {
   // Switch to docker profile
@@ -98,8 +104,10 @@ try {
   // Restore original profile
   if (originalProfile) {
     fs.writeFileSync(testProfileFile, originalProfile);
-  } else if (fs.existsSync(testProfileFile)) {
-    fs.unlinkSync(testProfileFile);
+  } else {
+    // force:true removes it if present and stays quiet otherwise — no window
+    // between checking and unlinking.
+    fs.rmSync(testProfileFile, { force: true });
   }
   console.log('✅ Restored original profile setting\n');
 } catch (error) {
@@ -107,8 +115,10 @@ try {
   // Cleanup
   if (originalProfile) {
     fs.writeFileSync(testProfileFile, originalProfile);
-  } else if (fs.existsSync(testProfileFile)) {
-    fs.unlinkSync(testProfileFile);
+  } else {
+    // force:true removes it if present and stays quiet otherwise — no window
+    // between checking and unlinking.
+    fs.rmSync(testProfileFile, { force: true });
   }
   process.exit(1);
 }

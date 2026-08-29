@@ -6,10 +6,11 @@ A Model Context Protocol (MCP) server that enables **Claude Code** and **OpenAI 
 
 [![npm version](https://img.shields.io/npm/v/mcp-ssh-manager.svg?style=for-the-badge&logo=npm)](https://www.npmjs.com/package/mcp-ssh-manager)
 [![npm downloads](https://img.shields.io/npm/dt/mcp-ssh-manager.svg?style=for-the-badge&logo=npm)](https://www.npmjs.com/package/mcp-ssh-manager)
-[![Version](https://img.shields.io/badge/Version-3.8.0-brightgreen?style=for-the-badge)](https://github.com/bvisible/mcp-ssh-manager/releases/tag/v3.8.0)
+[![Version](https://img.shields.io/badge/Version-3.8.5-brightgreen?style=for-the-badge)](https://github.com/bvisible/mcp-ssh-manager/releases/tag/v3.8.5)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-Compatible-5A67D8?style=for-the-badge&logo=anthropic)](https://claude.ai/code)
 [![OpenAI Codex](https://img.shields.io/badge/OpenAI_Codex-Compatible-00A67E?style=for-the-badge&logo=openai)](https://openai.com/codex)
 [![MCP](https://img.shields.io/badge/MCP-Server-orange?style=for-the-badge)](https://modelcontextprotocol.io)
+[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/bvisible/mcp-ssh-manager?style=for-the-badge&label=OpenSSF)](https://scorecard.dev/viewer/?uri=github.com/bvisible/mcp-ssh-manager)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
 [![MCP Toplist](https://mcptoplist.com/badge/glama%2Fbvisible%2Fmcp-ssh-manager.svg)](https://mcptoplist.com/server/glama%2Fbvisible%2Fmcp-ssh-manager)
@@ -22,28 +23,78 @@ A Model Context Protocol (MCP) server that enables **Claude Code** and **OpenAI 
 
 ---
 
-## 🎉 What's New in v3.8.0
+## 🎉 What's New in v3.8.5
 
-**👥 Groups that live in your config, `ssh_sync` fixed on Windows, and a crash that took the whole server down** (Released: August 14, 2026)
+**🔒 Security release — three command-injection advisories fixed, one of which defeated `readonly` mode** (Released: August 28, 2026)
 
-- **New optional `group` field per server** ([#56](https://github.com/bvisible/mcp-ssh-manager/pull/56) — contributed by [@ice616](https://github.com/ice616), requested in [#55](https://github.com/bvisible/mcp-ssh-manager/issues/55)) — tag a server with `group = "production"` and it *is* in that group: `ssh_execute_group` and `ssh_group_manage list` resolve members straight from your `.env`/TOML, so there is no `.server-groups.json` to maintain and the grouping travels with the config when you export it to another tool. Membership is the **union** of both sources, so groups you already store keep working untouched.
-- **🪟 `ssh_sync` works from a Windows host** ([#59](https://github.com/bvisible/mcp-ssh-manager/pull/59) — contributed by [@2836603852](https://github.com/2836603852)) — a local path like `C:\project` reached MSYS2 rsync unchanged, which read `C:` as a remote host and tried to SSH into a machine named `c`. Drive-letter, UNC and extended-length paths are now converted for the rsync argument only, while Node keeps the native path for its filesystem checks.
-- **💥 A tunnel on a busy port no longer kills the MCP server** — `ssh_tunnel_create` on an already-bound port hit an unhandled `'error'` event and took the entire process down with it, dropping every pooled SSH connection and open session. It now returns a normal error.
-- **🔒 Security: `@modelcontextprotocol/sdk` floor raised to `^1.30.0`** — the previous range still allowed versions carrying three published advisories, one of them high. `npm audit` is clean, and the `uuid` dependency is gone in favour of Node's built-in `crypto.randomUUID()`.
-- **🧪 JSDoc type-checking in CI** (`npm run typecheck`) — TypeScript now runs as a static checker over the plain JavaScript. **No build step, no `dist/`, nothing changes for users**; it found two of the bugs above on the day it landed.
+**Upgrade if you use `ssh_backup_*`, `ssh_db_dump`, `ssh_service_status` or `ssh_tail` — and especially if you rely on the `readonly` / `restricted` security modes.**
+
+- **🔴 RCE bypassing `readonly` / `restricted`** (GHSA-m793-whw6-f537) — `ssh_service_status` and `ssh_tail` are read-only, so they stay enabled on servers you locked down, and neither quoted its arguments nor consulted the policy layer. A service name like `nginx; id > /tmp/pwned` executed. This defeated the exact control those modes exist to provide.
+- **🔴 RCE through `ssh_db_dump`** (GHSA-796j-h5q5-jx6p) — the `stat` command run after the dump interpolated the output path raw. The v3.6.7 patch had stopped one line short.
+- **🟠 RCE through every `ssh_backup_*` tool** (GHSA-qwwm-vrm9-4mw8) — `backup-manager.js` had **zero** shell escaping across its 9 builders, while `database-manager.js` had 95. The v3.6.7 fix was never extended to it.
+
+The quoting helper now lives in one module (`src/shell-quote.js`) so "did this builder quote its inputs?" has a single answer, and a new test drives **340 builder × argument × payload combinations** through a real shell to prove none of them execute.
+
+[Read full changelog →](CHANGELOG.md#385---2026-08-28)
+
+---
+
+## 🔐 Giving an agent SSH access, safely
+
+An MCP SSH server is the most dangerous tool you can hand an AI agent: a shell on
+machines that matter. This one is built so you decide how far the agent can go —
+**per server**, not globally.
+
+| Mode | What the agent can do |
+|---|---|
+| `unrestricted` *(default)* | Everything. Same behaviour as any other SSH MCP server. |
+| `readonly` | Mutating tools are refused outright — no deploy, no upload, no sudo, no database import. Read commands still work. |
+| `restricted` | Every command must match an allow pattern **and** no deny pattern. Anything else is refused before it reaches the host. |
 
 ```env
-SSH_SERVER_WEB1_GROUP=production
+SSH_SERVER_PROD_MODE=readonly
+SSH_SERVER_STAGING_MODE=restricted
+SSH_SERVER_STAGING_ALLOW_PATTERNS=^systemctl (status|restart) myapp$;^tail -n \d+ /var/log/
 ```
 
-[Read full changelog →](CHANGELOG.md#380---2026-08-14)
+Alongside that:
+
+- **The sudo password never reaches the remote command line.** It travels on the
+  SSH channel's stdin, so it is not visible in `ps`, in `/proc/<pid>/cmdline`, or
+  in an `auditd` trail — unlike the `echo "$pass" | sudo -S` pattern common in
+  this category ([#34](https://github.com/bvisible/mcp-ssh-manager/issues/34)).
+- **Every database argument is shell-quoted** through one centralised helper,
+  guarded by a 648-combination injection test.
+- **Read-only SQL is enforced**, not suggested: `ssh_db_query` refuses anything
+  that is not a `SELECT`.
+- **Vulnerabilities are published, not buried.** See [SECURITY.md](SECURITY.md)
+  for the reporting process and the advisories already fixed.
+- **Reproducible installs**: the lockfile is committed, CI installs with
+  `npm ci`, and a test enforces that every dependency resolves to
+  registry.npmjs.org with an integrity hash and no unreviewed install scripts.
 
 ---
 
 ## Previous Releases
 
 <details>
-<summary><b>📜 Release history — v3.7.0 down to v1.0.0</b> (click to expand)</summary>
+<summary><b>📜 Release history — v3.8.4 down to v1.0.0</b> (click to expand)</summary>
+
+### v3.8.4 - Secrets stop reaching the log, CodeQL on every commit (August 28, 2026)
+
+- **🔒 The logger no longer writes secrets in clear text** — it writes to `~/.ssh-manager.log` and stderr (which your MCP host captures), so one call site handing it a server config would have persisted a production password. Redaction now happens inside the logger. Also: CodeQL on every push, every action pinned by SHA, and a broken example that never parsed. [Full changelog →](CHANGELOG.md#384---2026-08-28)
+
+### v3.8.2 / v3.8.3 - Sudo password leak fixed, MCP Registry, signed releases (August 28, 2026)
+
+- **🔒 The sudo password no longer reaches the remote command line** ([#34](https://github.com/bvisible/mcp-ssh-manager/issues/34)) — it travelled through `echo "<password>" | sudo -S`, readable in `ps` and `/proc/<pid>/cmdline` by every account on the host. It now goes over the SSH channel's stdin. Also: listed in the **official MCP Registry** as `io.github.bvisible/mcp-ssh-manager`, releases published from CI with **SLSA provenance** and a CycloneDX SBOM, and the per-server security modes documented at last. [Full changelog →](CHANGELOG.md#383---2026-08-28)
+
+### v3.8.1 - Reproducible installs and blocking quality gates (August 28, 2026)
+
+- **Committed lockfile** ([#60](https://github.com/bvisible/mcp-ssh-manager/pull/60) — contributed by [@cudatuda](https://github.com/cudatuda)) plus `npm run test:lockfile` guarding it against drift and tampering. CI installs with `npm ci`; ESLint and the JSDoc typecheck became blocking gates after being purely decorative. [Full changelog →](CHANGELOG.md#381---2026-08-28)
+
+### v3.8.0 - Groups in your config, `ssh_sync` on Windows, tunnel crash fix (August 14, 2026)
+
+- **👥 New optional `group` field per server** ([#56](https://github.com/bvisible/mcp-ssh-manager/pull/56) — contributed by [@ice616](https://github.com/ice616), requested in [#55](https://github.com/bvisible/mcp-ssh-manager/issues/55)) — tag a server with `group = "production"` and it *is* in that group: `ssh_execute_group` resolves members straight from your `.env`/TOML, union'd with any `.server-groups.json` you already keep. Also: `ssh_sync` fixed from a Windows host ([#59](https://github.com/bvisible/mcp-ssh-manager/pull/59) — contributed by [@2836603852](https://github.com/2836603852)), a tunnel on a busy port no longer takes the whole MCP server down, the `@modelcontextprotocol/sdk` floor raised to `^1.30.0` over three advisories, and JSDoc type-checking added to CI. [Full changelog →](CHANGELOG.md#380---2026-08-14)
 
 ### v3.7.0 - Per-server SSH agent forwarding (July 13, 2026)
 
@@ -1014,7 +1065,7 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for complete guide.
 "Backup website files excluding cache and logs"
 ```
 
-For detailed backup examples, see [examples/backup-workflow.js](examples/backup-workflow.js) and [docs/BACKUP_GUIDE.md](docs/BACKUP_GUIDE.md).
+For detailed backup examples, see [examples/backup-workflow.md](examples/backup-workflow.md) and [docs/BACKUP_GUIDE.md](docs/BACKUP_GUIDE.md).
 
 ### Using the Bash CLI
 

@@ -143,6 +143,7 @@ import {
 } from './database-manager.js';
 import { loadToolConfig, isToolEnabled } from './tool-config-manager.js';
 import { evaluatePolicy } from './policy.js';
+import { shellQuote, safeInteger } from './shell-quote.js';
 import { auditLog } from './audit.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1257,19 +1258,28 @@ registerToolConditional(
     }
   },
   async ({ server: serverName, file, lines = 10, follow = true, grep }) => {
+    // ssh_tail is read-only and therefore stays enabled in readonly/restricted
+    // mode, which is exactly why it must consult the policy layer: without this
+    // it was a way to run commands on a server the operator locked down
+    // (GHSA-m793-whw6-f537).
+    const denied = await applyServerPolicy(serverName, 'ssh_tail', { file, lines, follow, grep });
+    if (denied) return denied;
+
     try {
       const ssh = await getConnection(serverName);
 
-      // Build tail command
-      let command = `tail -n ${lines}`;
+      // Build tail command. Every caller-controlled value is quoted: `file` and
+      // `grep` sat inside double quotes, where $(...), backticks and a `"`
+      // breakout all executed.
+      let command = `tail -n ${safeInteger(lines, 10)}`;
       if (follow) {
         command += ' -f';
       }
-      command += ` "${file}"`;
+      command += ` ${shellQuote(file)}`;
 
       // Add grep filter if specified
       if (grep) {
-        command += ` | grep "${grep}"`;
+        command += ` | grep ${shellQuote(grep)}`;
       }
 
       logger.info(`Starting tail on ${serverName}`, {
@@ -2284,7 +2294,14 @@ registerToolConditional(
         for (const step of strategy.steps) {
           const command = step.command.replace('{{tempFile}}', tempFile);
 
-          const result = await execCommandWithTimeout(ssh, command, { platform: deployServerConfig?.platform }, 15000);
+          // step.stdin carries the sudo password for steps that need it, so it
+          // never reaches the remote command line (issue #34).
+          const result = await execCommandWithTimeout(
+            ssh,
+            command,
+            { platform: deployServerConfig?.platform, stdin: step.stdin ?? null },
+            15000
+          );
 
           if (result.code !== 0 && step.type !== 'backup') {
             throw new Error(`${step.type} failed: ${result.stderr}`);
@@ -2364,12 +2381,21 @@ registerToolConditional(
         fullCommand = `sudo ${fullCommand}`;
       }
 
-      // Add password if provided
-      if (password) {
-        fullCommand = `echo "${password}" | sudo -S ${command.replace(/^sudo /, '')}`;
-      } else if (serverConfig?.sudoPassword) {
-        // Use configured sudo password if available
-        fullCommand = `echo "${serverConfig.sudoPassword}" | sudo -S ${command.replace(/^sudo /, '')}`;
+      // Add password if provided. The password travels on the exec channel's
+      // stdin, never inside the command string: the previous
+      // `echo "<pass>" | sudo -S …` left it readable in the remote process list
+      // and /proc/<pid>/cmdline for anyone with an account on the host (#34).
+      //   -S  read the password from stdin
+      //   -k  invalidate any cached sudo timestamp first, so sudo always
+      //       consumes the password we wrote. Without it, an already-authorised
+      //       sudo skips the prompt and the password stays in the pipe, where
+      //       the command itself would read it as its own input.
+      //   -p ''  suppress the prompt, which would otherwise land in stderr.
+      let sudoStdin = null;
+      const effectiveSudoPassword = password || serverConfig?.sudoPassword;
+      if (effectiveSudoPassword) {
+        fullCommand = `sudo -S -k -p '' ${command.replace(/^sudo /, '')}`;
+        sudoStdin = `${effectiveSudoPassword}\n`;
       }
 
       // Add working directory if specified
@@ -2390,10 +2416,12 @@ registerToolConditional(
         }
       }
 
-      const result = await execCommandWithTimeout(ssh, fullCommand, { platform }, timeout);
+      const result = await execCommandWithTimeout(ssh, fullCommand, { platform, stdin: sudoStdin }, timeout);
 
-      // Mask password in output for security
-      const maskedCommand = fullCommand.replace(/echo "[^"]+" \| sudo -S/, 'sudo');
+      // The command string no longer carries the password, so there is nothing
+      // left to mask — the flags are shown as-is. Kept as a named value so the
+      // response format is unchanged for existing callers.
+      const maskedCommand = fullCommand;
 
       return {
         content: [
@@ -3523,7 +3551,7 @@ registerToolConditional(
       }
 
       // Get backup file size
-      const sizeResult = await ssh.execCommand(`stat -f%z "${backupFile}" 2>/dev/null || stat -c%s "${backupFile}" 2>/dev/null`);
+      const sizeResult = await ssh.execCommand(`stat -f%z ${shellQuote(backupFile)} 2>/dev/null || stat -c%s ${shellQuote(backupFile)} 2>/dev/null`);
       const size = parseInt(sizeResult.stdout.trim()) || 0;
 
       // Create and save metadata
@@ -4031,6 +4059,11 @@ registerToolConditional(
     }
   },
   async ({ server: serverName, services }) => {
+    // Read-only tools stay enabled under readonly/restricted, so they are the
+    // ones that most need the policy check (GHSA-m793-whw6-f537).
+    const denied = await applyServerPolicy(serverName, 'ssh_service_status', { services });
+    if (denied) return denied;
+
     try {
       const ssh = await getConnection(serverName);
 
@@ -4509,7 +4542,7 @@ registerToolConditional(
       }
 
       // Get file size
-      const sizeCommand = `stat -f%z "${outputFile}" 2>/dev/null || stat -c%s "${outputFile}" 2>/dev/null`;
+      const sizeCommand = `stat -f%z ${shellQuote(outputFile)} 2>/dev/null || stat -c%s ${shellQuote(outputFile)} 2>/dev/null`;
       const sizeResult = await ssh.execCommand(sizeCommand);
       const size = parseSize(sizeResult.stdout);
 

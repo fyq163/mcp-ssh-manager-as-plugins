@@ -5,6 +5,96 @@ All notable changes to MCP SSH Manager will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.5] - 2026-08-28
+
+### Security
+
+Three reported advisories, all the same class of bug, all confirmed present in 3.8.4 and fixed here. The v3.6.7 fix (CVE-2026-77383) introduced `shellQuote()` but applied it to `src/database-manager.js` only; the parallel builders for backups and monitoring were never covered.
+
+- **RCE through every `ssh_backup_*` builder** (GHSA-qwwm-vrm9-4mw8, high). `src/backup-manager.js` concatenated `database`, `dbUser`, `dbPassword`, `dbHost`, `backupDir`, `paths` and `exclude` into shell strings with no escaping — 0 uses of `shellQuote` across 9 builders. Arbitrary command execution as the SSH user on every managed server.
+- **RCE through `ssh_db_dump` and the MongoDB backup path** (GHSA-796j-h5q5-jx6p, critical). The follow-up `stat` command interpolated `outputFile` raw, after the dump itself had been fixed — the earlier patch stopped one line short.
+- **RCE bypassing readonly/restricted mode** (GHSA-m793-whw6-f537, critical). `ssh_service_status` and `ssh_tail` are read-only, so they stay enabled on servers the operator locked down — and neither quoted its arguments nor consulted the policy layer. `buildServiceStatusCommand` interpolated the service name unquoted six times; `ssh_tail` built `tail -n ${lines} "${file}" | grep "${grep}"` with double quotes only, so a `"` breakout ran. **This defeated the exact control those modes exist to provide**, and the README had just started advertising them.
+
+Fixes: `shellQuote()` extracted to `src/shell-quote.js` and applied across `backup-manager.js` (54 call sites), `health-monitor.js` and the remaining inline commands in `index.js`; a `safeInteger()` helper for numeric arguments that still land in command strings; `buildProcessInfoCommand` now validates its PID like `buildKillProcessCommand` always did; and `ssh_tail` and `ssh_service_status` now call the policy layer.
+
+Guarded by `npm run test:backupinjection`: **340 builder × argument × payload combinations** driven through a real `/bin/sh` with a canary file, asserting no payload ever executes. Verified by mutation — removing any single quote-call is caught.
+
+**Upgrade if you use `ssh_backup_*`, `ssh_db_dump`, `ssh_service_status` or `ssh_tail`, and especially if you rely on `readonly` or `restricted` mode.**
+
+## [3.8.4] - 2026-08-28
+
+### Security
+
+- **The logger no longer writes secrets in clear text** (CodeQL `js/clear-text-logging`, `src/logger.js`). Structured log data is now redacted inside the logger rather than at each call site: any key matching password / passphrase / secret / token / credential / private key / api key / auth becomes `[redacted]`, at any depth, in arrays, whatever the casing. This matters because the logger writes to **two** places outside our control — `~/.ssh-manager.log` and stderr, which the MCP host captures — so one forgotten call site handing over a whole server config would have persisted a production password. Cyclic objects are marked rather than followed, so a self-referencing config cannot hang a log call. Guarded by `npm run test:redaction`.
+
+### Fixed
+
+- **`examples/backup-workflow.js` did not parse at all**, and is now `examples/backup-workflow.md`. A cron expression (`*/6`) inside a `/* */` block closed the comment early. Repairing it exposed the deeper problem CodeQL then found (`js/call-to-non-callable`): the file called `createBackup(...)`, a function that does not exist anywhere — it was never a JavaScript API, but documentation of conversations with the agent, where the real operations are MCP tools (`ssh_backup_create`, …). Shipping it as executable `.js` in the npm tarball invited people to run something that could only throw. It is now Markdown, which is what it always was, with the illustrative nature stated at the top.
+- **`scripts/validate.sh` now syntax-checks every tracked `.js` file** (49 instead of 2), which is how the above escaped for so long. The guard is itself verified by deliberately breaking a file.
+- Two time-of-check/time-of-use races (CodeQL `js/file-system-race`): `ssh-key-manager.js` guarded `mkdirSync({recursive:true})` with an `existsSync` that was both redundant and racy, and `config-loader.js` checked for the Codex config before reading it instead of reading it and handling `ENOENT`.
+
+### Changed
+
+- **Every GitHub action is pinned to a commit SHA**, including `trufflesecurity/trufflehog`, which tracked the moving `main` branch inside a workflow that reads the whole repository. This closes 17 of the 22 findings OpenSSF Scorecard reported.
+- **CodeQL analysis added** (`security-and-quality`), answering Scorecard's SAST finding. It paid for itself immediately: every fix in this entry came out of its first run.
+- **Dependabot alerts and automated security fixes enabled** on the repository — they were switched off.
+- The `Release` workflow is re-runnable: it skips publishing when the version is already on the registry instead of failing on a duplicate, and creates the GitHub release if the SBOM step finds none.
+
+## [3.8.3] - 2026-08-28
+
+### Changed
+
+- **First release published from CI with build provenance and an attested SBOM.** 3.8.2 shipped the workflow but was still published by hand, so it carried no attestation — `npm audit signatures` found none for it, while the comparable competitor had both an npm publish attestation and SLSA provenance. This release closes that gap for real: anyone can now verify which commit and which workflow built the tarball.
+- **`zod` 3 → 4** ([#65](https://github.com/bvisible/mcp-ssh-manager/pull/65)). Verified before merging rather than after: with zod 4 installed, all 37 tools still register over a real MCP stdio handshake, and the full suite, typecheck and lint stay green. `@modelcontextprotocol/sdk` accepts `^3.25 || ^4.0`, and knip already wanted `^4.1.11`.
+- `actions/checkout` and `actions/setup-node` bumped to v7 ([#61](https://github.com/bvisible/mcp-ssh-manager/pull/61), [#62](https://github.com/bvisible/mcp-ssh-manager/pull/62)).
+
+### Note
+
+TypeScript 7 ([#64](https://github.com/bvisible/mcp-ssh-manager/issues/64)) and ESLint 10 ([#63](https://github.com/bvisible/mcp-ssh-manager/issues/63)) were declined, not deferred by accident: knip 5 pins `peer typescript ">=5.0.4 <7"`, and ESLint 9+ requires migrating off `.eslintrc` to flat config — tracked in [#66](https://github.com/bvisible/mcp-ssh-manager/issues/66).
+
+## [3.8.2] - 2026-08-28
+
+### Security
+
+- **The sudo password no longer reaches the remote command line** ([#34](https://github.com/bvisible/mcp-ssh-manager/issues/34)). `ssh_execute_sudo` and the three privileged steps of `ssh_deploy` built `echo "<password>" | sudo -S <cmd>`, which published the password to the remote process list, `/proc/<pid>/cmdline` and any `auditd` trail for the lifetime of the `echo` — readable by every account on the host. The existing output masking never helped: it only redacted the copy sent back to the agent. The password now travels on the SSH exec channel's stdin (`sudo -S -k -p ''`), where no other process can observe it. `-k` is required: without it an already-authorised sudo skips the prompt, leaving the password in the pipe for the command itself to read as input. Guarded by `npm run test:sudostdin`, which also fails if the old pipeline reappears anywhere in `src/`.
+
+### Added
+
+- **`server.json`** — the manifest for the official [MCP Registry](https://registry.modelcontextprotocol.io), published as `io.github.bvisible/mcp-ssh-manager`, plus the `mcpName` field in `package.json` that proves package ownership. The registry is what feeds MCP clients today; the project was absent from it.
+- **OpenSSF Scorecard workflow and badge** — a public grade of the repository's supply-chain posture. For a server that hands an agent a shell on production machines, that grade is part of the product.
+- **`Release` workflow** publishing to npm with build provenance and attaching a CycloneDX SBOM to each GitHub release. Removes the hand-publish step that failed twice on 2026-08-28 (expired token, then a 2FA prompt), and lets anyone verify the tarball's origin with `npm audit signatures`.
+- **README section "Giving an agent SSH access, safely"** documenting the per-server `unrestricted` / `readonly` / `restricted` modes, which existed since v3.5.0 but were never surfaced where readers land.
+
+### Fixed
+
+- `SSHManager.execCommand` accepts an `stdin` option, written to the exec channel and then closed. Commands that pass no stdin are untouched, so interactive remote processes keep working.
+
+## [3.8.1] - 2026-08-28
+
+### Added
+
+- **`package-lock.json` is now committed** (contributed by @cudatuda in #60) — installs are reproducible, `npm ci` works, and the transitive tree is auditable. npm excludes lockfiles from published tarballs, so consumers of the package are unaffected.
+- **`npm run test:lockfile`** (`tests/test-lockfile.js`, wired into `npm test`) — guards the lockfile against the ways it rots: version drift between `package.json` and the lockfile's two version fields, dependency ranges out of sync, a locked version outside its declared range, packages resolved from anywhere but registry.npmjs.org, missing integrity hashes, `file:`/`git+`/`link:` entries, unreviewed install scripts, and runtime dependencies requiring a newer Node than `engines.node` advertises.
+- **Node 22.x added to the CI test matrix** — `engines` claims `>=18` and 22 is the active LTS.
+- **`.github/dependabot.yml`** — a pinned tree stops receiving upstream fixes on its own, so monthly grouped dependency updates (capped at 3 open PRs) act as the counterweight. GitHub Actions versions are tracked too.
+- **Advisory `npm audit --omit=dev --audit-level=high` step** in the `Code Quality` workflow. Not a required check: a CVE published against a transitive dependency should be visible without blocking unrelated merges.
+
+### Changed
+
+- **CI installs with `npm ci` instead of `npm install`** in both workflows. `npm ci` reproduces the locked tree exactly and aborts if `package.json` and the lockfile have drifted.
+- **ESLint and the JSDoc typecheck are now blocking**, and moved into the `lint` job — one of the three required status checks on `main`. They previously lived in the advisory `Code Quality` workflow, where ESLint additionally ran with `continue-on-error: true`, so neither gate could ever fail a pull request.
+- **Node module caching now works.** `Code Quality` keyed its cache on `hashFiles('**/package-lock.json')` while the lockfile was gitignored, so every run shared one degenerate key. Replaced by `actions/setup-node@v4`'s built-in `cache: 'npm'`.
+- GitHub Actions bumped from `actions/checkout@v3` / `actions/setup-node@v3` / `actions/cache@v3` to v4.
+
+### Removed
+
+- **`npm install --save-dev eslint prettier` from the `Code Quality` workflow** — it re-resolved both packages to their latest majors on every run (ESLint 9 over the pinned `^8.56.0`) and rewrote `package.json` in the CI workspace, defeating the pinning it ran next to.
+- Redundant CI steps re-running `test-profiles.js`, `test-command-aliases.js` and `test-hooks.js` individually after `npm test` had already run them.
+
+### Fixed
+
+- `mcp-ssh-manager-setup.md`: the two `.gitignore` templates no longer tell readers to ignore `package-lock.json`.
+
 ## [3.8.0] - 2026-08-14
 
 ### Security
