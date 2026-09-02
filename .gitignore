@@ -42,6 +42,10 @@ dist/
 build/
 *.egg-info/
 
+# Local dev overrides (absolute-path MCP config for old Codex versions)
+.codex/
+.codebuddy/
+
 # Temporary files
 tmp/
 temp/

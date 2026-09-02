@@ -1157,8 +1157,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🟢 OpenCode
 
-The MCP server is registered as an OpenCode plugin via `opencode.json`
-(located in this repo root) and a stub plugin entry in `.opencode/plugins/`.
+`mcp-ssh-manager` ships an **OpenCode plugin** (the same package, the
+`exports["./server"]` entrypoint) that bridges all 37 MCP tools into
+OpenCode's native plugin tool interface. This means a **single
+`plugin` entry** is all that's needed — no separate `mcp` config block
+required.
 
 ### Option A — open the submodule directory directly
 
@@ -1167,15 +1170,41 @@ cd plugins/codex-plugin-ssh-manager  # or the cloned standalone repo
 opencode
 ```
 
-OpenCode auto-discovers `opencode.json` and `.opencode/plugins/*.js` in the
-project root, so the `mcp-ssh-manager` MCP server and tools load with no
-further configuration.
+OpenCode auto-discovers `.opencode/plugins/*.js` in the project root, so
+the bridge plugin loads with no further configuration.
 
-Server config is read (in precedence order) from:
+### Option B — install globally from npm (recommended)
+
+Add to `~/.config/opencode/opencode.jsonc`:
+
+```jsonc
+"plugin": [
+  "mcp-ssh-manager"
+]
+```
+
+The plugin spawns `npx -y mcp-ssh-manager` on first use, runs the MCP
+`initialize` handshake, and registers all 37 tools under the names
+returned by `tools/list` (e.g. `ssh_execute`, `ssh_list_servers`, etc.).
+
+### Local development install (no npm publish)
+
+For testing before a release, point OpenCode at the local plugin file:
+
+```jsonc
+"plugin": [
+  "file:///absolute/path/to/plugins/codex-plugin-ssh-manager/.opencode/plugins/mcp-ssh-manager.js"
+]
+```
+
+### Server config
+
+The bridge plugin forwards `SSH_CONFIG_PATH` (or defaults to
+`~/.config/mcp-ssh-manager/ssh-config.toml`) to the spawned MCP server.
+Server definitions are read (in precedence order) from:
 
 1. `SSH_*` environment variables
-2. `$SSH_CONFIG_PATH` (defaults to
-   `~/.config/mcp-ssh-manager/ssh-config.toml`)
+2. `$SSH_CONFIG_PATH` (defaults to `~/.config/mcp-ssh-manager/ssh-config.toml`)
 3. `.env` in the working directory
 
 Point `$SSH_CONFIG_PATH` at the same TOML file you use for Codex to share
@@ -1185,17 +1214,9 @@ server definitions across clients:
 export SSH_CONFIG_PATH=~/.codex/ssh-config.toml
 ```
 
-### Option B — install into your global OpenCode config
-
-```bash
-mkdir -p ~/.config/opencode/plugins
-cp -r .opencode/plugins ~/.config/opencode/
-# Merge the `mcp` block from opencode.json into ~/.config/opencode/opencode.json
-```
-
 ### Usage
 
-With the MCP server enabled (`opencode mcp list` shows `mcp-ssh-manager`),
+With the plugin enabled, ask OpenCode:
 ask OpenCode:
 
 - "List my SSH servers"
