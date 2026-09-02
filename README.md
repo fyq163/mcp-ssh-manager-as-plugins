@@ -1155,6 +1155,60 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
+## 🟢 OpenCode
+
+The MCP server is registered as an OpenCode plugin via `opencode.json`
+(located in this repo root) and a stub plugin entry in `.opencode/plugins/`.
+
+### Option A — open the submodule directory directly
+
+```bash
+cd plugins/codex-plugin-ssh-manager  # or the cloned standalone repo
+opencode
+```
+
+OpenCode auto-discovers `opencode.json` and `.opencode/plugins/*.js` in the
+project root, so the `mcp-ssh-manager` MCP server and tools load with no
+further configuration.
+
+Server config is read (in precedence order) from:
+
+1. `SSH_*` environment variables
+2. `$SSH_CONFIG_PATH` (defaults to
+   `~/.config/mcp-ssh-manager/ssh-config.toml`)
+3. `.env` in the working directory
+
+Point `$SSH_CONFIG_PATH` at the same TOML file you use for Codex to share
+server definitions across clients:
+
+```bash
+export SSH_CONFIG_PATH=~/.codex/ssh-config.toml
+```
+
+### Option B — install into your global OpenCode config
+
+```bash
+mkdir -p ~/.config/opencode/plugins
+cp -r .opencode/plugins ~/.config/opencode/
+# Merge the `mcp` block from opencode.json into ~/.config/opencode/opencode.json
+```
+
+### Usage
+
+With the MCP server enabled (`opencode mcp list` shows `mcp-ssh-manager`),
+ask OpenCode:
+
+- "List my SSH servers"
+- "Run df -h on production"
+- "Upload file.txt to staging:/tmp/"
+- "Backup production MySQL database"
+
+> **Note:** OpenCode plugins are JS/TS event hooks, distinct from MCP
+> servers. The "remind before raw ssh" nudge hook (ported from the Codex
+  `prompt_mcp_ssh.py`) is tracked for a future release.
+
+---
+
 ## Known Limitations
 
 ### Command Timeout
