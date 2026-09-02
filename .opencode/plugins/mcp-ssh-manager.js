@@ -306,6 +306,8 @@ class MCPBridge {
 let bridge = null;
 
 export const MCPSSHManagerPlugin = async (ctx) => {
+  process.stderr.write(`[mcp-ssh-manager] plugin loaded, starting bridge\n`);
+
   if (!bridge) {
     bridge = new MCPBridge();
   }
@@ -378,6 +380,8 @@ function _sshNudge(ctx) {
     }
   };
 }
+
+export default MCPSSHManagerPlugin;
 
 if (typeof process !== "undefined") {
   process.on("exit", () => bridge?.stop());
