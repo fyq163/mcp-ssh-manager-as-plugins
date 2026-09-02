@@ -1173,7 +1173,37 @@ opencode
 OpenCode auto-discovers `.opencode/plugins/*.js` in the project root, so
 the bridge plugin loads with no further configuration.
 
-### Option B — install globally from npm (recommended)
+### Option B — one-liner install (recommended)
+
+The plugin can be installed with a single command — no npm publish
+required, no `file:///` in your config, no MCP entry to maintain:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fyq163/mcp-ssh-manager-as-plugins/feat/ssh-manager-codex-plugin/scripts/install-opencode.sh | bash
+```
+
+This downloads `mcp-ssh-manager.js` into
+`~/.config/opencode/plugins/`. OpenCode auto-loads everything in that
+directory at startup, so the 37 SSH tools become available immediately.
+The plugin spawns `npx -y mcp-ssh-manager` on first use, runs the MCP
+`initialize` handshake, and registers all 37 tools under the names
+returned by `tools/list` (e.g. `ssh_execute`, `ssh_list_servers`).
+
+Uninstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fyq163/mcp-ssh-manager-as-plugins/feat/ssh-manager-codex-plugin/scripts/install-opencode.sh | bash -s -- --uninstall
+```
+
+Or, with a specific branch/tag:
+
+```bash
+VERSION=v3.8.6 ./install-opencode.sh
+./install-opencode.sh --branch main
+./install-opencode.sh --dest /custom/path/mcp-ssh-manager.js
+```
+
+### Option C — install from npm
 
 Add to `~/.config/opencode/opencode.jsonc`:
 
@@ -1183,9 +1213,9 @@ Add to `~/.config/opencode/opencode.jsonc`:
 ]
 ```
 
-The plugin spawns `npx -y mcp-ssh-manager` on first use, runs the MCP
-`initialize` handshake, and registers all 37 tools under the names
-returned by `tools/list` (e.g. `ssh_execute`, `ssh_list_servers`, etc.).
+The package is fetched by Bun on first start (requires publishing to npm
+first; this is the model used once `mcp-ssh-manager` v3.8.6+ is
+released on npm).
 
 ### Local development install (no npm publish)
 
