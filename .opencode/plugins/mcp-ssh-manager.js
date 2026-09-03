@@ -1,18 +1,22 @@
 // OpenCode plugin entry for mcp-ssh-manager.
 //
 // This file is the OpenCode *plugin* entrypoint, resolved via package.json
-// `exports["./server"]`. It spawns the mcp-ssh-manager MCP server as a
-// subprocess and bridges its 37 tools into OpenCode's native plugin tool
-// interface — so a single `plugin: ["mcp-ssh-manager"]` entry in
-// opencode.jsonc is sufficient. No separate `mcp` config block required.
+// `exports["./server"]` (or `exports["."]`). It spawns the mcp-ssh-manager
+// MCP server as a subprocess and bridges its 37 tools into OpenCode's
+// native plugin tool interface — so a single `plugin: ["mcp-ssh-manager"]`
+// entry in opencode.jsonc is sufficient. No separate `mcp` config block
+// required.
 //
 // Architecture:
 //   1. spawn npx -y mcp-ssh-manager  (or node src/index.js from package root)
 //   2. JSON-RPC 2.0 initialise handshake over stdio
-//   3. tools/list → discover all 37 tools + their Zod→JSON-Schema descriptors
+//   3. tools/list → discover all 37 tools + their JSON-Schema descriptors
 //   4. Each MCP tool is mapped to an OpenCode plugin tool() definition using
-//      `tool.schema` (OpenCode's own Zod instance — avoids cross-instance
-//      mismatches that crash tool registration).
+//      Zod (the package's own copy, version-matched to the runtime). The
+//      `tool()` helper is just a pass-through identity function; we don't
+//      import `@opencode-ai/plugin/tool` because that package is not
+//      available when this plugin is loaded from a npm/git install
+//      (Bun only installs runtime deps, not the OpenCode SDK).
 //   5. tool.execute() proxies a tools/call request to the subprocess.
 //
 // Future improvements:
@@ -20,14 +24,14 @@
 //   - Support MCP resource templates and prompts if the server adds them.
 //   - Add cancellation via notifications/cancelled.
 
-import { tool } from "@opencode-ai/plugin/tool";
+import { z } from "zod";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import { existsSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const z = tool.schema;
+const tool = (def) => def;
 
 // ─── JSON-Schema → Zod converter ───────────────────────────────────
 
@@ -306,8 +310,6 @@ class MCPBridge {
 let bridge = null;
 
 export const MCPSSHManagerPlugin = async (ctx) => {
-  process.stderr.write(`[mcp-ssh-manager] plugin loaded, starting bridge\n`);
-
   if (!bridge) {
     bridge = new MCPBridge();
   }
