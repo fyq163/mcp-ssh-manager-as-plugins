@@ -171,8 +171,13 @@ class Logger {
 
     const formatted = this.formatMessage(level, message, data);
 
-    // Output to stderr for proper MCP logging
-    console.error(formatted.console);
+    // In interactive terminals logs can land on the same stderr Kilo/OpenCode
+    // uses for its TUI, causing backend output to overwrite the frontend.
+    // Only write to stderr when it's a real TTY; otherwise keep logs silent
+    // here and rely on the file sink below.
+    if (process.stderr && process.stderr.isTTY) {
+      console.error(formatted.console);
+    }
 
     // Also write to file
     try {
