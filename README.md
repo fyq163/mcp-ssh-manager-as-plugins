@@ -1244,6 +1244,19 @@ server definitions across clients:
 export SSH_CONFIG_PATH=~/.codex/ssh-config.toml
 ```
 
+If OpenCode is launched from a desktop app and cannot find Node.js on its
+`PATH`, set `MCP_SSH_MANAGER_NODE` to the absolute path of the Node executable.
+You can find that path in a terminal with `command -v node` (or `where node` on
+Windows). For example:
+
+```bash
+MCP_SSH_MANAGER_NODE=/absolute/path/to/node opencode
+```
+
+The variable must be available to the OpenCode process. For a desktop launch,
+add it to that app's launch environment; the plugin will use it when starting
+its bundled MCP server.
+
 ### Usage
 
 With the plugin enabled, ask OpenCode:

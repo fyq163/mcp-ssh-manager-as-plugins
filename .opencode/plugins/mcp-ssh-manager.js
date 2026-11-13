@@ -129,7 +129,13 @@ class MCPBridge {
 
   getSpawnCommand() {
     const entry = findMcpServerEntry();
-    if (entry) return { command: "node", args: [entry] };
+    if (entry) {
+      // OpenCode may be launched from a desktop app whose PATH does not include
+      // Node.js (for example, when Node was installed through a shell manager).
+      // Allow users to point directly at the Node executable in that case.
+      const command = process.env.MCP_SSH_MANAGER_NODE?.trim() || "node";
+      return { command, args: [entry] };
+    }
     return { command: "npx", args: ["-y", "mcp-ssh-manager"] };
   }
 
@@ -153,8 +159,11 @@ class MCPBridge {
     });
 
     this.child.on("error", (err) => {
+      const hint = err.code === "ENOENT" && command !== "npx"
+        ? ` Node.js executable "${command}" was not found; set MCP_SSH_MANAGER_NODE to its absolute path or add Node.js to OpenCode's PATH.`
+        : "";
       process.stderr.write(
-        `[mcp-ssh-manager] spawn error: ${err.message}\n`
+        `[mcp-ssh-manager] spawn error: ${err.message}.${hint}\n`
       );
       this.child = null;
       this.ready = false;
