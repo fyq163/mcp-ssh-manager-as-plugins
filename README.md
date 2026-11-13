@@ -1179,20 +1179,20 @@ The plugin can be installed with a single command — no npm publish
 required, no `file:///` in your config, no MCP entry to maintain:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fyq163/mcp-ssh-manager-as-plugins/feat/ssh-manager-codex-plugin/scripts/install-opencode.sh | bash
+curl -fsSL https://raw.githubusercontent.com/fyq163/mcp-ssh-manager-as-plugins/codex-oc-plugins/scripts/install-opencode.sh | bash
 ```
 
 This downloads `mcp-ssh-manager.js` into
 `~/.config/opencode/plugins/`. OpenCode auto-loads everything in that
 directory at startup, so the 37 SSH tools become available immediately.
-The plugin spawns `npx -y mcp-ssh-manager` on first use, runs the MCP
-`initialize` handshake, and registers all 37 tools under the names
-returned by `tools/list` (e.g. `ssh_execute`, `ssh_list_servers`).
+The installer records the absolute Node executable it finds at install time in
+`mcp-ssh-manager.config.json`. The plugin uses that saved path when starting
+its MCP server, even if OpenCode later starts with a different `PATH`.
 
 Uninstall:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/fyq163/mcp-ssh-manager-as-plugins/feat/ssh-manager-codex-plugin/scripts/install-opencode.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/fyq163/mcp-ssh-manager-as-plugins/codex-oc-plugins/scripts/install-opencode.sh | bash -s -- --uninstall
 ```
 
 Or, with a specific branch/tag:
@@ -1244,18 +1244,16 @@ server definitions across clients:
 export SSH_CONFIG_PATH=~/.codex/ssh-config.toml
 ```
 
-If OpenCode is launched from a desktop app and cannot find Node.js on its
-`PATH`, set `MCP_SSH_MANAGER_NODE` to the absolute path of the Node executable.
-You can find that path in a terminal with `command -v node` (or `where node` on
-Windows). For example:
+The one-line installer records the Node executable automatically. For local
+development or npm-based installs that do not use that installer, you can
+override the Node path with `MCP_SSH_MANAGER_NODE`:
 
 ```bash
-MCP_SSH_MANAGER_NODE=/absolute/path/to/node opencode
+MCP_SSH_MANAGER_NODE="$(command -v node)" opencode
 ```
 
-The variable must be available to the OpenCode process. For a desktop launch,
-add it to that app's launch environment; the plugin will use it when starting
-its bundled MCP server.
+Set this variable in OpenCode's launch environment only when you need to
+override the path saved by the installer.
 
 ### Usage
 

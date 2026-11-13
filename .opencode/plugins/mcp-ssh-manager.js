@@ -27,8 +27,8 @@
 import { z } from "zod";
 import { spawn } from "node:child_process";
 import os from "node:os";
-import { existsSync } from "node:fs";
-import { dirname, resolve, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const tool = (def) => def;
@@ -105,6 +105,19 @@ function findMcpServerEntry() {
   return null;
 }
 
+function loadInstalledConfig() {
+  try {
+    const configPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "mcp-ssh-manager.config.json"
+    );
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    return config && typeof config === "object" ? config : {};
+  } catch {
+    return {};
+  }
+}
+
 class MCPBridge {
   constructor() {
     this.child = null;
@@ -117,6 +130,14 @@ class MCPBridge {
 
   getEnv() {
     const env = { ...process.env };
+    const nodePath = this.getNodeCommand();
+    if (isAbsolute(nodePath)) {
+      const nodeDir = dirname(nodePath);
+      const currentPath = env.PATH || "";
+      if (!currentPath.split(delimiter).includes(nodeDir)) {
+        env.PATH = [nodeDir, currentPath].filter(Boolean).join(delimiter);
+      }
+    }
     if (!env.SSH_CONFIG_PATH) {
       const tomlPath = join(
         os.homedir(),
@@ -127,14 +148,19 @@ class MCPBridge {
     return env;
   }
 
+  getNodeCommand() {
+    const override = process.env.MCP_SSH_MANAGER_NODE?.trim();
+    if (override) return override;
+    const installed = loadInstalledConfig();
+    return typeof installed.nodePath === "string" && installed.nodePath.trim()
+      ? installed.nodePath.trim()
+      : "node";
+  }
+
   getSpawnCommand() {
     const entry = findMcpServerEntry();
     if (entry) {
-      // OpenCode may be launched from a desktop app whose PATH does not include
-      // Node.js (for example, when Node was installed through a shell manager).
-      // Allow users to point directly at the Node executable in that case.
-      const command = process.env.MCP_SSH_MANAGER_NODE?.trim() || "node";
-      return { command, args: [entry] };
+      return { command: this.getNodeCommand(), args: [entry] };
     }
     return { command: "npx", args: ["-y", "mcp-ssh-manager"] };
   }
@@ -160,7 +186,7 @@ class MCPBridge {
 
     this.child.on("error", (err) => {
       const hint = err.code === "ENOENT" && command !== "npx"
-        ? ` Node.js executable "${command}" was not found; set MCP_SSH_MANAGER_NODE to its absolute path or add Node.js to OpenCode's PATH.`
+        ? ` Node.js executable "${command}" was not found; reinstall the plugin after changing Node.js, set MCP_SSH_MANAGER_NODE to its absolute path, or add Node.js to OpenCode's PATH.`
         : "";
       process.stderr.write(
         `[mcp-ssh-manager] spawn error: ${err.message}.${hint}\n`
