@@ -8,6 +8,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { logger } from './logger.js';
 import { shellQuote, safeInteger } from './shell-quote.js';
+import { guardedDump, guardedFeed, mongoArchivePath } from './dump-guard.js';
 
 // Backup types
 export const BACKUP_TYPES = {
@@ -38,10 +39,68 @@ export function getBackupMetadataPath(backupId, backupDir = DEFAULT_BACKUP_DIR) 
 }
 
 /**
+ * Refuse a backup ID that is not one.
+ *
+ * GHSA-2wjh-xm9c-7qf9: ssh_backup_restore took `backupId` from the caller and
+ * spliced the path built from it into `cat "…"`, where `$(...)` and backticks
+ * still run — remote code execution through a tool that was only meant to
+ * restore. Quoting (buildReadMetadataCommand) is the fix; this is the second
+ * wall. An ID is a file name inside the backup directory, so a path separator,
+ * a `..` segment or a control character can only mean somebody is reaching
+ * elsewhere. Spaces and dots stay allowed: IDs carry the backup's name, and a
+ * name that worked before must still restore.
+ *
+ * @param {unknown} backupId - As the caller sent it
+ * @returns {string} The same ID, known to be a plain file name
+ */
+export function assertSafeBackupId(backupId) {
+  const id = String(backupId ?? '');
+  // eslint-disable-next-line no-control-regex
+  if (!id || /[/\\\u0000-\u001f\u007f]/.test(id) || id === '.' || id === '..') {
+    throw new Error(`Invalid backup ID: ${JSON.stringify(id)}`);
+  }
+  return id;
+}
+
+/**
+ * Build the command that reads a backup's metadata (ssh_backup_restore).
+ * @param {string} backupId - Checked with assertSafeBackupId
+ * @param {string} [backupDir]
+ * @returns {string}
+ */
+export function buildReadMetadataCommand(backupId, backupDir = DEFAULT_BACKUP_DIR) {
+  return `cat ${shellQuote(getBackupMetadataPath(assertSafeBackupId(backupId), backupDir))}`;
+}
+
+/**
+ * Build the command that makes sure the backup directory exists
+ * (ssh_backup_create). Quoted like every other use of the directory: the
+ * inline `mkdir -p "…"` it replaces was the half of GHSA-qwwm-vrm9-4mw8 that
+ * the 3.8.x fix missed.
+ * @param {string} [backupDir]
+ * @returns {string}
+ */
+export function buildEnsureBackupDirCommand(backupDir = DEFAULT_BACKUP_DIR) {
+  return `mkdir -p ${shellQuote(backupDir)}`;
+}
+
+/**
  * Get backup file path
  */
 export function getBackupFilePath(backupId, backupDir = DEFAULT_BACKUP_DIR, extension = '.gz') {
   return path.join(backupDir, `${backupId}${extension}`);
+}
+
+/**
+ * The extension of the file (or directory) a backup of this kind is stored as.
+ * MongoDB is the one that differs: a compressed dump is the archive mongoArchivePath()
+ * names, <id>.tar.gz, and an uncompressed one is the dump directory itself.
+ * @param {string} type
+ * @param {boolean} [compressed]
+ */
+export function backupExtension(type, compressed = true) {
+  if (type !== BACKUP_TYPES.MONGODB) return '.gz';
+  return compressed ? '.tar.gz' : '';
 }
 
 /**
@@ -75,13 +134,8 @@ export function buildMySQLDumpCommand(options) {
   command += ` ${shellQuote(database)}`;
 
   // Output handling
-  if (compress) {
-    command += ` | gzip > ${shellQuote(outputFile)}`;
-  } else {
-    command += ` > ${shellQuote(outputFile)}`;
-  }
-
-  return command;
+  // A producer that fails must fail the whole command and leave no file: see dump-guard.js.
+  return guardedDump(command, outputFile, compress);
 }
 
 /**
@@ -118,13 +172,8 @@ export function buildPostgreSQLDumpCommand(options) {
   command += ` ${shellQuote(database)}`;
 
   // Output handling
-  if (compress) {
-    command += ` | gzip > ${shellQuote(outputFile)}`;
-  } else {
-    command += ` > ${shellQuote(outputFile)}`;
-  }
-
-  return command;
+  // A producer that fails must fail the whole command and leave no file: see dump-guard.js.
+  return guardedDump(command, outputFile, compress);
 }
 
 /**
@@ -157,7 +206,7 @@ export function buildMongoDBDumpCommand(options) {
 
   // Compress the output directory
   if (compress) {
-    const archiveName = `${outputDir}.tar.gz`;
+    const archiveName = mongoArchivePath(outputDir);
     // dirname/basename receive the quoted value, so the substitution itself
     // cannot be steered by the caller.
     command += ` && tar -czf ${shellQuote(archiveName)} -C "$(dirname ${shellQuote(outputDir)})" "$(basename ${shellQuote(outputDir)})"`;
@@ -237,14 +286,7 @@ function buildMySQLRestoreCommand(backupFile, options) {
 
   let command = '';
 
-  // Decompress if needed
-  if (backupFile.endsWith('.gz')) {
-    command = `gunzip -c ${shellQuote(backupFile)} | `;
-  } else {
-    command = `cat ${shellQuote(backupFile)} | `;
-  }
-
-  command += 'mysql';
+  command = 'mysql';
 
   // Connection parameters
   if (user) command += ` -u${shellQuote(user)}`;
@@ -253,7 +295,9 @@ function buildMySQLRestoreCommand(backupFile, options) {
   if (port) command += ` -P ${safeInteger(port, 3306)}`;
   if (database) command += ` ${shellQuote(database)}`;
 
-  return command;
+  // A gzip file is verified whole before mysql reads a byte of it (dump-guard.js).
+  if (backupFile.endsWith('.gz')) return guardedFeed(backupFile, command);
+  return `cat ${shellQuote(backupFile)} | ${command}`;
 }
 
 /**
@@ -285,11 +329,8 @@ function buildPostgreSQLRestoreCommand(backupFile, options) {
   command += ' --clean --if-exists';
 
   // Handle compressed files
-  if (backupFile.endsWith('.gz')) {
-    command = `gunzip -c ${shellQuote(backupFile)} | ${command}`;
-  } else {
-    command += ` ${shellQuote(backupFile)}`;
-  }
+  if (backupFile.endsWith('.gz')) return guardedFeed(backupFile, command);
+  command += ` ${shellQuote(backupFile)}`;
 
   return command;
 }
@@ -442,6 +483,29 @@ export function buildCronScheduleCommand(schedule, backupCommand, cronComment) {
   // through shellQuote so a schedule or comment carrying quotes cannot break
   // out of the echo and run something else. backupCommand is built by the
   // builders above, which quote their own arguments.
-  const cronLine = `${schedule} ${backupCommand} # ${cronComment}`;
+  //
+  // Quoting the echo was the 3.8.5 fix, and it was not enough: cron reads
+  // everything after the fifth field as the command to run, and a line break
+  // as the start of another job, so `* * * * * curl … | sh #` installed a job
+  // of the caller's choosing. The schedule must now be a schedule.
+  if (!isCronSchedule(schedule)) {
+    throw new Error('Schedule must be five cron fields (e.g. "0 2 * * *") or a macro such as @daily');
+  }
+  const comment = String(cronComment).replace(/[\r\n]+/g, ' ');
+  const cronLine = `${schedule.trim()} ${backupCommand} # ${comment}`;
   return `(crontab -l 2>/dev/null; echo ${shellQuote(cronLine)}) | crontab -`;
+}
+
+/**
+ * Whether a string is a crontab schedule and nothing more: five time fields,
+ * or one of cron's @ macros.
+ * @param {any} schedule
+ * @returns {boolean}
+ */
+export function isCronSchedule(schedule) {
+  if (typeof schedule !== 'string') return false;
+  const text = schedule.trim();
+  if (/^@(yearly|annually|monthly|weekly|daily|midnight|hourly|reboot)$/.test(text)) return true;
+  const fields = text.split(/[ \t]+/);
+  return fields.length === 5 && fields.every(field => /^[0-9A-Za-z*/,-]+$/.test(field));
 }

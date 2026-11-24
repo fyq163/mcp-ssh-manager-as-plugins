@@ -44,11 +44,9 @@ ssh-manager server show SERVER                # Show server details
 
 ### OpenAI Codex Integration
 ```bash
-ssh-manager codex setup                       # Configure for Codex
-ssh-manager codex migrate                     # Convert servers to TOML
-ssh-manager codex test                        # Test Codex integration
-ssh-manager codex convert to-toml            # Convert .env to TOML
-ssh-manager codex convert to-env             # Convert TOML to .env
+ssh-manager codex setup                       # Point Codex at this engine (~/.codex/config.toml)
+ssh-manager codex status                      # What Codex runs today
+ssh-manager export servers.toml               # Servers as TOML (.toml, .env, .csv and .xlsx are written)
 ```
 
 ### Tool Management (NEW in v3.1)
@@ -73,6 +71,8 @@ npm ci                                        # Install the exact tree from pack
 npm start                                     # Start MCP server (requires stdin)
 npm test                                      # Run the full test suite
 npm run typecheck                             # Type-check JSDoc with tsc (no build, nothing emitted)
+npm run build:ui                              # Build the interface (ui/) into dist/ui: generated, git-ignored, run by `prepack`;
+                                              # needed before `ssh-manager control` from a checkout and before the browser tests
 npm run test:all                              # Tests + typecheck + validation
 ./scripts/validate.sh                        # Run all validation checks
 node --check src/index.js                   # Check JavaScript syntax
@@ -81,6 +81,8 @@ python -m py_compile tools/*.py             # Check Python syntax
 
 **Typecheck**: `tsconfig.json` runs TypeScript in `checkJs`/`noEmit` mode over the plain JS —
 this project ships JavaScript straight from `src/` with no build step, and that must stay true.
+The interface is the one generated thing: `dist/ui` is built from `ui/` when the package is packed and when the desktop
+app is assembled, never committed (`scripts/build-interface.mjs`; CI fails if `dist/` is tracked).
 The baseline is 0 errors and CI enforces it, so add JSDoc annotations (or a narrow
 `/** @type {...} */` cast) rather than leaving new errors. `typescript` is pinned to `^6`
 because knip 5 declares `peer typescript ">=5.0.4 <7"` — bumping one requires bumping the other.
@@ -181,6 +183,7 @@ SSH_SERVER_[NAME]_HOST=hostname
 SSH_SERVER_[NAME]_USER=username
 SSH_SERVER_[NAME]_PASSWORD=password         # For password auth
 SSH_SERVER_[NAME]_KEYPATH=~/.ssh/key       # For SSH key auth
+SSH_SERVER_[NAME]_AGENT_PUBLIC_KEY_PATH=~/.ssh/id_ed25519.pub # Alternative: select one SSH_AUTH_SOCK identity
 SSH_SERVER_[NAME]_PASSPHRASE=passphrase    # Optional, for passphrase-protected keys
 SSH_SERVER_[NAME]_PORT=22                  # Optional
 SSH_SERVER_[NAME]_DEFAULT_DIR=/path        # Optional default working directory
@@ -190,6 +193,8 @@ SSH_SERVER_[NAME]_PLATFORM=windows         # Optional: "linux" (default) or "win
 SSH_SERVER_[NAME]_PROXYJUMP=bastion        # Optional: name of another server to use as jump host
 SSH_SERVER_[NAME]_PROXYCOMMAND=command      # Optional: custom proxy command (ncat, ssh -W, etc.)
 SSH_SERVER_[NAME]_FORWARD_AGENT=true       # Optional: forward local ssh-agent to remote (needs SSH_AUTH_SOCK; security risk)
+SSH_SERVER_[NAME]_TRANSFER_ROOT=~/transfers # Optional: the only local folder the file tools may use (readonly/restricted servers default to ~/.ssh-manager/transfers for downloads)
+SSH_SERVER_[NAME]_ANNOUNCE_AGENT=true      # Optional: send AI_AGENT=mcp-ssh-manager to this host (off by default; SSH_MANAGER_ANNOUNCE_AGENT=true for all)
 ```
 
 ### TOML Format
@@ -208,7 +213,22 @@ platform = "windows"                       # Optional: "linux" (default) or "win
 proxy_jump = "bastion"                     # Optional: name of another server to use as jump host
 proxy_command = "command"                   # Optional: custom proxy command (ncat, ssh -W, etc.)
 forward_agent = true                       # Optional: forward local ssh-agent to remote (needs SSH_AUTH_SOCK; security risk)
+announce_agent = true                      # Optional: send AI_AGENT=mcp-ssh-manager to this host (off by default; false keeps it silent under the global switch)
+transfer_root = "~/transfers"                # Optional: the only local folder the file tools may use (see docs/SECURITY_MODES.md)
 ```
+
+### Selecting an SSH agent key
+
+Use `agent_public_key_path` in TOML or `SSH_SERVER_[NAME]_AGENT_PUBLIC_KEY_PATH` in `.env` (internal field: `agentPublicKeyPath`) to select a single public key from the existing agent at `SSH_AUTH_SOCK`:
+
+```toml
+[ssh_servers.agent_host]
+host = "example.com"
+user = "admin"
+agent_public_key_path = "~/.ssh/id_ed25519.pub"
+```
+
+This works with compatible SSH agents, including compatible password-manager agents; signing stays in the agent. Missing or invalid public key files, an unavailable agent, or no matching identity fail authentication without falling back to other agent identities. Combining this option with `key_path`, `password`, `cert_path`, or enabled `forward_agent` is rejected. Without this option, existing authentication behavior is unchanged. `ssh_sync` uses system OpenSSH and does not apply this filter; configure `IdentityFile` and `IdentitiesOnly yes` separately in the SSH client configuration.
 
 ## Key Implementation Details
 

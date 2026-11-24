@@ -1,0 +1,473 @@
+/**
+ * Groups, known host keys, tunnels — the state that lives in files and can
+ * therefore be read from here.
+ *
+ * Tunnels are the exception worth explaining on screen: they live in a Map
+ * inside the MCP server's own process, so this process can only see what that
+ * one publishes. Showing a stale list would be worse than saying so.
+ */
+import { useEffect, useState } from 'react';
+import { AlertTriangle, KeyRound, Layers, Loader2, Monitor, Moon, Network, Palette, Pencil, Play, Plus, Sun, Trash2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { state, hostKeys, groups as groupsApi, thresholds as thresholdsApi, type Options, type Group, type GroupRunEvent, type Thresholds } from '@/lib/api';
+import { GroupDialog } from '@/components/servers/GroupDialog';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { useServersStore } from '@/stores/servers.store';
+import { useWorkspace } from '@/stores/workspace';
+import { useTheme, type ThemeMode } from '@/stores/theme';
+import { cn } from '@/lib/utils';
+import { VaultPanel } from '@/components/VaultPanel';
+import { AgentsPanel } from '@/components/AgentsPanel';
+import { UpdatesPanel } from '@/components/UpdatesPanel';
+import { useAppUpdate } from '@/stores/appUpdate.store';
+import { PageHeader } from '@/components/layout/PageHeader';
+import { languages, setLanguage, useLocale, type Language, tr } from '@/lib/i18n';
+
+
+/** A tab's own height, so a wrapped row keeps the size of the first. */
+const TAB = 'h-7 flex-none';
+
+const THEMES: { id: ThemeMode; label: string; hint: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: 'system', label: 'Match the desktop', hint: 'follows your system setting, including when it changes', icon: Monitor },
+  { id: 'light', label: 'Light', hint: 'always light, whatever the system does', icon: Sun },
+  { id: 'dark', label: 'Dark', hint: 'always dark', icon: Moon },
+];
+
+/**
+ * Matching the desktop is first and is the default: an application that ignores
+ * the system setting is one you have to configure twice, and most people never
+ * do the second time.
+ */
+function ThemePicker() {
+  useLocale();
+  const { mode, resolved, setMode } = useTheme();
+  return (
+    <div className="grid gap-2 sm:grid-cols-3">
+      {THEMES.map(theme => {
+        const Icon = theme.icon;
+        const active = mode === theme.id;
+        return (
+          <button
+            key={theme.id}
+            onClick={() => setMode(theme.id)}
+            aria-pressed={active}
+            className={cn(
+              'rounded-lg border p-3 text-left transition-colors',
+              active
+                ? 'border-primary bg-primary/5'
+                : 'border-border bg-card hover:bg-card-hover'
+            )}
+          >
+            <div className="flex items-center gap-2">
+              <Icon className={cn('h-4 w-4', active ? 'text-primary' : 'text-muted-foreground')} />
+              <span className="text-sm font-medium">{tr(theme.label)}</span>
+              {theme.id === 'system' && (
+                <span className="ml-auto shrink-0 whitespace-nowrap text-[10px] text-muted-foreground">{resolved === 'dark' ? tr('currently dark') : tr('currently light')}</span>
+              )}
+            </div>
+            <p className="mt-0.5 text-xs text-muted-foreground">{tr(theme.hint)}</p>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+
+/**
+ * The levels at which a machine is worth mentioning.
+ *
+ * Held on this machine, not pushed onto the servers. The engine's
+ * `ssh_alert_setup` writes a config file onto each box; that is a lot of blast
+ * radius for three numbers, and it only helps something running *there* —
+ * nothing does. The watching happens here, when you press the health button.
+ */
+function Thresholds() {
+  useLocale();
+  const [limits, setLimits] = useState<Thresholds | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    void thresholdsApi.get().then(r => setLimits(r.thresholds)).catch(() => {});
+  }, []);
+
+  if (!limits) return null;
+
+  const update = (patch: Partial<Thresholds>) => {
+    const next = { ...limits, ...patch };
+    setLimits(next);
+    setSaving(true);
+    void thresholdsApi.save(next).finally(() => setSaving(false));
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-3">
+      <label className="mb-3 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={limits.enabled}
+          onChange={e => update({ enabled: e.target.checked })}
+          className="h-3.5 w-3.5"
+        />{tr("Point out machines over these levels")}<span className="text-xs text-muted-foreground">
+          {/* Said plainly: nothing runs on a timer, here or on the servers. */}{tr("— checked when you probe, never in the background")}</span>
+        {saving && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+      </label>
+
+      <div className="grid grid-cols-3 gap-3">
+        {([['cpu', 'CPU'], ['memory', 'Memory'], ['disk', 'Disk']] as const).map(([key, label]) => (
+          <div key={key} className="grid gap-1">
+            <span className="text-xs text-muted-foreground">{tr(label)}</span>
+            <div className="flex items-center gap-1">
+              <Input
+                type="number"
+                min={1}
+                max={100}
+                value={limits[key]}
+                disabled={!limits.enabled}
+                onChange={e => update({ [key]: Number(e.target.value) || limits[key] })}
+                className="h-8"
+              />
+              <span className="text-xs text-muted-foreground">%</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** The engine's own descriptions of the built-in and the config-derived groups. */
+const ENGINE_GROUP_DESCRIPTIONS = new Set(['All configured servers', 'Production servers', 'Staging/test servers', 'Development servers']);
+const DERIVED_GROUP_DESCRIPTION = /^Servers configured with group = "(.*)"$/;
+
+/**
+ * Those descriptions come from the engine in English, so they are translated
+ * here when they are exactly the engine's. A description somebody wrote for a
+ * group of their own is theirs and is shown as written.
+ */
+function groupDescription(description: string): string {
+  const derived = DERIVED_GROUP_DESCRIPTION.exec(description);
+  if (derived) return tr('Servers configured with group = "{{name}}"', { name: derived[1] });
+  return ENGINE_GROUP_DESCRIPTIONS.has(description) ? tr(description) : description;
+}
+
+export function OptionsPage() {
+  const language = useLocale();
+  const [options, setOptions] = useState<Options | null>(null);
+  const [filter, setFilter] = useState('');
+  const [forgetting, setForgetting] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Group | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [run, setRun] = useState<GroupRunEvent | null>(null);
+  const [output, setOutput] = useState<GroupRunEvent[]>([]);
+  const loadServers = useServersStore(s => s.load);
+  const servers = useServersStore(s => s.servers);
+  const setView = useWorkspace(s => s.setView);
+  const setServerDraft = useWorkspace(s => s.setServerDraft);
+  const optionsTab = useWorkspace(s => s.optionsTab);
+  const setOptionsTab = useWorkspace(s => s.setOptionsTab);
+  // Updates exist only in the desktop application; a browser tab has none, and
+  // a link to the tab from somewhere else lands on the first one instead.
+  const appUpdate = useAppUpdate(s => s.info);
+  const tab = optionsTab === 'updates' && !appUpdate ? 'appearance' : optionsTab;
+  const updateWaiting = appUpdate !== null && ['available', 'downloading', 'ready'].includes(appUpdate.status);
+
+  const reload = () => state.options().then(setOptions).catch(() => {});
+  useEffect(() => {
+    void reload();
+    // The server list feeds the group form's picker.
+    void loadServers();
+    return state.subscribe(event => {
+      if (event.type === 'options') void reload();
+      if (event.type !== 'group-run') return;
+      const progress = event as unknown as GroupRunEvent;
+      setRun(progress.state === 'done' || progress.state === 'failed' ? null : progress);
+      if (progress.state === 'progress') setOutput(current => [...current, progress]);
+      if (progress.state === 'started') setOutput([]);
+    });
+  }, [loadServers]);
+
+  if (!options) {
+    return (
+      <div className="flex flex-1 items-center justify-center">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  const matching = options.hostKeys.filter(entry =>
+    entry.host.toLowerCase().includes(filter.trim().toLowerCase())
+  );
+
+  // Hosts that are already servers get no "add" button — the row would be an
+  // invitation to create a duplicate.
+  const configured = new Set(
+    servers.map(server => server.host?.toLowerCase()).filter(Boolean));
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <PageHeader title={tr("Options")} hint={tr("Settings for this machine only.")} />
+
+      {/* Five settings screens' worth of controls used to be one column you
+          scrolled through, which made "where is the thing I came for" a reading
+          exercise. Tabs answer it before you scroll. */}
+      <Tabs value={tab} onValueChange={setOptionsTab} className="flex min-h-0 flex-1 flex-col">
+        {/* Wraps in a narrow window. The list's one-row height and the tabs'
+            "fill the list" height are both overridden, under the same variant
+            the component sets them with, or a second row falls outside the
+            list and over the panel below. */}
+        <TabsList className="mx-6 mt-4 w-fit max-w-[calc(100%-3rem)] shrink-0 flex-wrap justify-start group-data-[orientation=horizontal]/tabs:h-auto">
+          <TabsTrigger value="appearance" className={TAB}>{tr("Appearance")}</TabsTrigger>
+          <TabsTrigger value="vault" className={TAB}>{tr("Vault")}</TabsTrigger>
+          <TabsTrigger value="agents" className={TAB}>{tr("AI tools")}</TabsTrigger>
+          {appUpdate && (
+            <TabsTrigger value="updates" className={TAB}>{tr("Updates")}{updateWaiting && <span role="img" aria-label={tr("update available")} className="h-1.5 w-1.5 rounded-full bg-primary" />}
+            </TabsTrigger>
+          )}
+          <TabsTrigger value="alerts" className={TAB}>{tr("Alerts")}</TabsTrigger>
+          <TabsTrigger value="groups" className={TAB}>{tr("Groups")}</TabsTrigger>
+          <TabsTrigger value="tunnels" className={TAB}>{tr("Tunnels")}</TabsTrigger>
+          <TabsTrigger value="hosts" className={TAB}>{tr("Known hosts")}</TabsTrigger>
+        </TabsList>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">
+        <TabsContent value="appearance" className="mt-0 space-y-4">
+          <h2 className="mb-2 flex items-center gap-2 text-xs font-medium tracking-wider uppercase">
+            <Palette className="h-3.5 w-3.5" />{tr("Appearance")}</h2>
+          {/* The label and the options are multilingual on purpose, and never go
+              through tr(): somebody who landed in the wrong language must be
+              able to find this in the language they do read. Both come from the
+              language files themselves, so a new language appears here by existing. */}
+          <div className="rounded-lg border border-border bg-card p-4">
+            <label htmlFor="interface-language" className="mb-2 block text-sm font-medium">{languages.map(item => item.label).join(' / ')}</label>
+            <select
+              id="interface-language"
+              value={language}
+              onChange={event => void setLanguage(event.target.value as Language)}
+              className="w-full max-w-xs rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs focus-visible:outline-2 focus-visible:outline-ring"
+            >
+              {languages.map(item => <option key={item.code} value={item.code}>{item.name}</option>)}
+            </select>
+          </div>
+          <ThemePicker />
+        </TabsContent>
+
+        <TabsContent value="vault" className="mt-0"><VaultPanel /></TabsContent>
+
+        <TabsContent value="agents" className="mt-0"><AgentsPanel /></TabsContent>
+
+        <TabsContent value="updates" className="mt-0"><UpdatesPanel /></TabsContent>
+
+        <TabsContent value="alerts" className="mt-0 space-y-4">
+          <h2 className="mb-2 flex items-center gap-2 text-xs font-medium tracking-wider uppercase">
+            <AlertTriangle className="h-3.5 w-3.5" />{tr("Alert thresholds")}</h2>
+          <Thresholds />
+        </TabsContent>
+
+        <TabsContent value="groups" className="mt-0 space-y-4">
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="flex items-center gap-2 text-xs font-medium tracking-wider uppercase">
+              <Layers className="h-3.5 w-3.5" />{tr("Groups")}<span className="text-muted-foreground">({options.groups.length})</span>
+            </h2>
+            <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setCreating(true)}>
+              <Plus className="h-3.5 w-3.5" />{tr("New group")}</Button>
+          </div>
+
+          {run && (
+            <div className="mb-2 rounded-md border border-border bg-muted px-3 py-1.5 text-xs">{tr('Running on {{group}} — {{done}} of {{total}}', { group: run.group, done: run.done ?? 0, total: run.total ?? 0 })}
+              {run.server && <span className="ml-2 font-mono">{run.server}</span>}
+            </div>
+          )}
+          {output.length > 0 && (
+            <div className="mb-3 overflow-hidden rounded-md border border-border">
+              <div className="flex items-center gap-2 border-b border-border bg-muted px-3 py-1.5">
+                <span className="text-xs font-medium">{tr("Results")}</span>
+                <span className="text-[10px] text-muted-foreground">
+                  {tr('{{ok}} of {{total}} succeeded', { ok: output.filter(e => e.code === 0).length, total: output.length })}</span>
+                <button className="ml-auto text-[10px] text-muted-foreground hover:text-foreground"
+                  onClick={() => setOutput([])}>{tr("clear")}</button>
+              </div>
+              <div className="max-h-64 overflow-auto">
+              {output.map((entry, index) => (
+                <div key={index} className="border-b border-border-subtle p-2 last:border-b-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium">{entry.server}</span>
+                    <Badge variant={entry.code === 0 ? 'outline' : 'destructive'}>{tr('exit {{code}}', { code: entry.code })}</Badge>
+                  </div>
+                  {(entry.stdout || entry.stderr) && (
+                    <pre className="mt-1 max-h-32 overflow-auto font-mono text-[11px] whitespace-pre-wrap text-muted-foreground">
+                      {entry.stdout}{entry.stderr}
+                    </pre>
+                  )}
+                </div>
+              ))}
+              </div>
+            </div>
+          )}
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
+            {options.groups.map(group => (
+              <div key={group.name} className="group/card rounded-lg border border-border bg-card p-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium">{group.name}</span>
+                  {group.dynamic && <Badge variant="secondary">{tr('dynamic')}</Badge>}
+                  {group.fromConfig && <Badge variant="outline">{tr("from config")}</Badge>}
+                  <div className="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover/card:opacity-100">
+                    <Button
+                      variant="ghost" size="icon" aria-label={tr("Run a command on {{v0}}", { v0: group.name })}
+                      disabled={group.serverCount === 0 || Boolean(run)}
+                      onClick={() => {
+                        const command = window.prompt(tr("Run on {{v0}} server(s) in \"{{v1}}\"", { v0: group.serverCount, v1: group.name }));
+                        if (command?.trim()) void groupsApi.run(group.name, command);
+                      }}
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                    </Button>
+                    {/* A config-derived group follows the servers' own field;
+                        editing it here would create a copy that stops
+                        following it. */}
+                    {!group.dynamic && (
+                      <>
+                        <Button variant="ghost" size="icon" aria-label={tr("Edit {{v0}}", { v0: group.name })}
+                          onClick={() => setEditing(group)}>
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost" size="icon" aria-label={tr('Delete {{name}}', { name: group.name })}
+                          onClick={async () => {
+                            if (!window.confirm(tr("Delete the group \"{{v0}}\"? The servers are untouched.", { v0: group.name }))) return;
+                            try {
+                              await groupsApi.remove(group.name);
+                              void reload();
+                            } catch (e) {
+                              window.alert((e as Error).message);
+                            }
+                          }}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                  <span className="text-xs text-muted-foreground tabular-nums">{group.serverCount}</span>
+                </div>
+                {group.description && (
+                  <p className="mt-0.5 text-xs text-muted-foreground">{groupDescription(group.description)}</p>
+                )}
+                {group.servers.length > 0 && (
+                  <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground">
+                    {group.servers.join(', ')}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="tunnels" className="mt-0 space-y-4">
+          <h2 className="mb-2 flex items-center gap-2 text-xs font-medium tracking-wider uppercase">
+            <Network className="h-3.5 w-3.5" />{tr("Tunnels")}</h2>
+          {options.tunnels.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {options.tunnelsStale
+                ? tr("The published list is stale — the MCP server that opened them is no longer running.")
+                : tr("None open. Tunnels live inside the MCP server’s process; this screen shows what that process publishes.")}
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {options.tunnels.map(tunnel => (
+                <li key={tunnel.id} className="rounded-md border border-border bg-card px-3 py-2 font-mono text-xs">
+                  {tunnel.description ?? tunnel.id}
+                </li>
+              ))}
+            </ul>
+          )}
+        </TabsContent>
+
+        <TabsContent value="hosts" className="mt-0 space-y-4">
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="flex items-center gap-2 text-xs font-medium tracking-wider uppercase">
+              <KeyRound className="h-3.5 w-3.5" />{tr("Known hosts")}<span className="text-muted-foreground">({options.hostKeys.length})</span>
+            </h2>
+            <input
+              value={filter}
+              onChange={e => setFilter(e.target.value)}
+              placeholder={tr("Filter")}
+              className="ml-auto h-7 w-48 rounded-md border border-input bg-transparent px-2 text-xs focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+            />
+          </div>
+
+          <div className="overflow-hidden rounded-lg border border-border">
+            {matching.slice(0, 200).map(entry => {
+              const key = `${entry.host}:${entry.port}`;
+              return (
+                <div key={key} className="group flex items-center gap-3 border-b border-border-subtle px-3 py-1.5 last:border-b-0 hover:bg-card-hover">
+                  <span className="w-56 shrink-0 truncate font-mono text-xs">{entry.host}</span>
+                  {entry.port !== 22 && <span className="text-[10px] text-muted-foreground">:{entry.port}</span>}
+                  <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
+                    {/* One host can hold several keys of different types, which
+                        is why this reads the array rather than a single field. */}
+                    {entry.keys.map(k => k.type).join(', ')}
+                  </span>
+                  {/* A known host is a machine you have already connected to.
+                      Offering to configure it here saves retyping an address
+                      the application is looking at — and answers the obvious
+                      question this list otherwise raises, which is why these
+                      are not in Servers. */}
+                  {!configured.has(entry.host.toLowerCase()) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 shrink-0 px-2 text-xs opacity-0 transition-opacity group-hover:opacity-100"
+                      onClick={() => {
+                        setServerDraft({ host: entry.host, port: entry.port });
+                        setView('servers');
+                      }}
+                    >
+                      <Plus className="h-3.5 w-3.5" />{tr("Add as a server")}</Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={tr("Forget {{v0}}", { v0: entry.host })}
+                    className="opacity-0 group-hover:opacity-100"
+                    disabled={forgetting === key}
+                    onClick={async () => {
+                      if (!window.confirm(tr("Forget the host key for {{v0}}?", { v0: entry.host }))) return;
+                      setForgetting(key);
+                      try {
+                        await hostKeys.forget(entry.host, entry.port);
+                        await reload();
+                      } finally {
+                        setForgetting(null);
+                      }
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              );
+            })}
+            {matching.length > 200 && (
+              <p className="px-3 py-2 text-[10px] text-muted-foreground">
+                {matching.length - 200} {tr("more — narrow the filter to see them.")}</p>
+            )}
+            {matching.length === 0 && (
+              <p className="px-3 py-2 text-xs text-muted-foreground">{tr("No host matches.")}</p>
+            )}
+          </div>
+        </TabsContent>
+        </div>
+      </Tabs>
+
+      {(creating || editing) && (
+        <GroupDialog
+          group={editing}
+          onClose={() => { setCreating(false); setEditing(null); }}
+          onSaved={() => { setCreating(false); setEditing(null); void reload(); }}
+        />
+      )}
+    </div>
+  );
+}

@@ -12,29 +12,30 @@
 
 import fs from 'fs';
 import path from 'path';
-import { logger } from './logger.js';
+import { logger, SECRET_KEY_PATTERN } from './logger.js';
 
-// Field names whose values should never appear in the audit log even if a tool
-// somehow passed them through args. Case-insensitive.
-const REDACT_FIELDS = new Set([
-  'password',
-  'passphrase',
-  'sudopassword',
-  'sudo_password',
-  'token',
-  'secret',
-  'apikey',
-  'api_key',
-]);
-
+// A value whose key looks like a secret never appears in the audit log, even if
+// a tool passed it through args. The rule is the logger's (SECRET_KEY_PATTERN),
+// not a list of exact names: a list missed dbPassword and db_password, so a
+// database password reached the log, and the approval request, in clear text.
 const REDACTED = '***';
 
-function sanitize(value) {
+/**
+ * Deep-copy a value with secret-looking fields replaced.
+ *
+ * Exported because the approval request must carry the same redacted view the
+ * audit log records: a second implementation would eventually drift, and the
+ * drift would be a password reaching a UI.
+ *
+ * @param {any} value - Value to sanitize
+ * @returns {any} A redacted copy
+ */
+export function sanitize(value) {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(sanitize);
   const out = {};
   for (const [k, v] of Object.entries(value)) {
-    if (REDACT_FIELDS.has(k.toLowerCase())) {
+    if (SECRET_KEY_PATTERN.test(k)) {
       out[k] = REDACTED;
     } else {
       out[k] = sanitize(v);

@@ -1,9 +1,12 @@
-// Security regression test for three advisories, all the same class of bug:
+// Security regression test for four advisories, all the same class of bug:
 //
 //   GHSA-qwwm-vrm9-4mw8 (high)     — every builder in backup-manager.js
 //   GHSA-796j-h5q5-jx6p (critical) — ssh_db_dump's follow-up stat, MongoDB dump
 //   GHSA-m793-whw6-f537 (critical) — buildServiceStatusCommand and ssh_tail,
 //                                    which bypassed readonly/restricted mode
+//   GHSA-2wjh-xm9c-7qf9 (high)     — ssh_backup_restore's backupId and
+//                                    ssh_backup_create's mkdir, two inline
+//                                    commands in index.js the first fix missed
 //
 // The v3.6.7 fix (CVE-2026-77383) introduced shellQuote() but applied it to
 // database-manager.js only. The parallel builders for backups and monitoring
@@ -20,6 +23,7 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import zlib from 'zlib';
 import {
   buildMySQLDumpCommand,
   buildPostgreSQLDumpCommand,
@@ -29,8 +33,14 @@ import {
   buildSaveMetadataCommand,
   buildListBackupsCommand,
   buildCleanupCommand,
-  buildCronScheduleCommand
+  buildCronScheduleCommand,
+  isCronSchedule,
+  assertSafeBackupId,
+  buildReadMetadataCommand,
+  buildEnsureBackupDirCommand,
+  generateBackupId
 } from '../src/backup-manager.js';
+import { buildDeploymentStrategy, getTempFilename } from '../src/deploy-helper.js';
 import {
   buildServiceStatusCommand,
   buildProcessListCommand,
@@ -48,7 +58,7 @@ function ok(label) { console.log(`\x1b[32m✓\x1b[0m ${passed + 1}. ${label}`); 
 // through, so an escape would really execute.
 const FAKE_BINARIES = [
   'mysqldump', 'mysql', 'pg_dump', 'pg_restore', 'mongodump', 'mongorestore',
-  'crontab', 'systemctl', 'service', 'pgrep', 'ps'
+  'crontab', 'systemctl', 'service', 'pgrep', 'ps', 'sudo'
 ];
 
 // Payloads that each break out of a different quoting mistake.
@@ -98,6 +108,14 @@ function canaryFired(command) {
   return fired;
 }
 
+// ssh_deploy's steps as the handler sends them, temp file substituted.
+function deployCommands(remotePath, options = {}, localName = 'app.js') {
+  const temp = getTempFilename(localName);
+  return buildDeploymentStrategy(remotePath, { backup: true, ...options }).steps
+    .map(step => step.command.replace('{{tempFile}}', () => shellQuote(temp)))
+    .join('\n');
+}
+
 // Each case names a builder and the argument the payload is injected into.
 function buildCases(payload) {
   const out = path.join(workRoot, 'out.dump');
@@ -127,8 +145,20 @@ function buildCases(payload) {
     ['list backups / dir', () => buildListBackupsCommand(payload)],
     ['list backups / type', () => buildListBackupsCommand(workRoot, payload)],
     ['cleanup / dir', () => buildCleanupCommand(payload, 7)],
+    // GHSA-2wjh: ssh_backup_restore reading the metadata, ssh_backup_create
+    // making the directory. A refused ID counts as a defence, like any builder
+    // that throws; the directory has no such check and must be quoted.
+    ['restore metadata / backupId', () => buildReadMetadataCommand(payload, workRoot)],
+    ['restore metadata / backupDir', () => buildReadMetadataCommand('mysql_app_x', payload)],
+    ['create / backupDir', () => buildEnsureBackupDirCommand(path.join(workRoot, payload))],
     ['cron schedule / schedule', () => buildCronScheduleCommand(payload, 'echo hi', 'c')],
     ['cron schedule / comment', () => buildCronScheduleCommand('0 2 * * *', 'echo hi', payload)],
+    // ssh_deploy: the remote path sat in double quotes, owner and permissions
+    // were bare, and the temp name carried the local file name unquoted.
+    ['deploy / remotePath', () => deployCommands(path.join(workRoot, payload))],
+    ['deploy / owner', () => deployCommands(path.join(workRoot, 'f'), { owner: payload })],
+    ['deploy / permissions', () => deployCommands(path.join(workRoot, 'f'), { permissions: payload })],
+    ['deploy / local file name', () => deployCommands(path.join(workRoot, 'f'), {}, payload)],
     // GHSA-m793 sink A
     ['service status / name', () => buildServiceStatusCommand(payload)],
     ['process list / filter', () => buildProcessListCommand({ filter: payload })],
@@ -188,16 +218,83 @@ function testProcessInfoRejectsNonNumericPid() {
   ok('buildProcessInfoCommand rejects every non-PID input');
 }
 
+function testHostKeyRemovalIsNotAShellCommand() {
+  // removeHostKey ran `ssh-keygen -R "<host>"` through a shell, and `host`
+  // comes from a server config — which an operator, or the control plane's own
+  // form, can set to anything. Same class as the builders above, found while
+  // wiring the options screen.
+  const source = fs.readFileSync(new URL('../src/ssh-key-manager.js', import.meta.url), 'utf8');
+  assert.ok(!/execSync\(`[^`]*\$\{/.test(source),
+    'ssh-key-manager must not interpolate values into a shell command string');
+  assert.ok(source.includes('execFileSync(\'ssh-keygen\''),
+    'host key removal must pass arguments to the process, not through a shell');
+  ok('host key removal passes arguments directly, never through a shell');
+}
+
+function testCronLineCannotCarryAJob() {
+  // Quoting the echo was not enough in 3.8.5: the canary above never fires for
+  // a schedule, because the line is data for crontab. The job it installs is
+  // the attack: cron runs everything after the fifth field, and a line break
+  // starts another job.
+  for (const schedule of ['* * * * * touch CANARY #', '0 2 * * *\n* * * * * touch CANARY', '@reboot touch CANARY', '0 2 * *', '']) {
+    assert.equal(isCronSchedule(schedule), false, JSON.stringify(schedule));
+    assert.throws(() => buildCronScheduleCommand(schedule, '/usr/local/bin/x.sh', 'c'), JSON.stringify(schedule));
+  }
+  for (const schedule of ['0 2 * * *', '*/15 * * * mon-fri', '0 0 1 jan *', '@daily', ' 30 4 * * 0 ']) {
+    assert.equal(isCronSchedule(schedule), true, JSON.stringify(schedule));
+  }
+  const line = buildCronScheduleCommand('0 2 * * *', '/usr/local/bin/x.sh', 'a\n* * * * * touch CANARY');
+  assert.ok(!line.includes('\n'), 'a comment cannot start a second crontab line');
+  ok('a cron schedule must be a schedule: no command, no second job');
+}
+
+function testBackupIdIsAFileName() {
+  // GHSA-2wjh-xm9c-7qf9. The report's own payload first: it has no separator,
+  // so it passes the ID check — and must still not run, because it is quoted.
+  const reported = 'x$(touch CANARY).meta';
+  assert.equal(assertSafeBackupId(reported), reported);
+  assert.ok(!canaryFired(buildReadMetadataCommand(reported, workRoot)), 'the reported payload executed');
+
+  for (const bad of ['', '..', '.', '../../etc/passwd', 'a/b', 'a\\b', 'x\ntouch CANARY', 'x\u0000y', null, undefined]) {
+    assert.throws(() => assertSafeBackupId(bad), `backupId ${JSON.stringify(bad)} must be refused`);
+  }
+  // What ssh_backup_create generates, and an ID made from an older backup name
+  // with a space in it, still restore.
+  for (const good of [generateBackupId('mysql', 'production'), 'files_my site_2026-10-25T13-00-00-000Z_ab12cd34']) {
+    assert.equal(assertSafeBackupId(good), good);
+  }
+
+  // The class, not the instance: no remote command in index.js may splice a
+  // value inside double quotes, where $(...) and backticks still run.
+  const index = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+  const raw = index.split('\n').filter(line => /execCommand\(`[^`]*"\$\{/.test(line));
+  assert.deepStrictEqual(raw, [], `raw double-quoted interpolation in a remote command:\n${raw.join('\n')}`);
+  ok('a backup ID is a plain file name, and no remote command splices a value inside double quotes');
+}
+
 function testBenignValuesStillWork() {
   // Quoting must not break ordinary use — a fix nobody can use is not a fix.
+  // The command is run for real, with a dump program that records what it was
+  // given: the values must arrive whole (a password with a space, a path with
+  // one), and the dump must land at the path asked for.
+  const dir = fs.mkdtempSync(path.join(workRoot, 'benign-'));
+  const bin = path.join(dir, 'bin');
+  fs.mkdirSync(bin);
+  const argvFile = path.join(dir, 'argv');
+  fs.writeFileSync(path.join(bin, 'mysqldump'),
+    `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a" >> "${argvFile}"; done\necho 'CREATE TABLE t (id int);'\n`, { mode: 0o755 });
+  const outputFile = path.join(dir, 'my backups', 'app.sql.gz');
+  fs.mkdirSync(path.dirname(outputFile));
   const cmd = buildMySQLDumpCommand({
     database: 'my_app', user: 'backup', password: 'p@ss w0rd', host: 'db.internal',
-    port: 3306, outputFile: '/var/backups/app.sql.gz', compress: true
+    port: 3306, outputFile, compress: true
   });
-  assert.ok(cmd.includes("'my_app'"), 'database must be quoted');
-  assert.ok(cmd.includes("'p@ss w0rd'"), 'a password with a space must survive quoting');
-  assert.ok(cmd.includes("| gzip > '/var/backups/app.sql.gz'"), 'the output path must be quoted');
-  assert.ok(cmd.startsWith('mysqldump'), 'the command itself must be unchanged');
+  execSync(cmd, { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, stdio: 'pipe' });
+  const argv = fs.readFileSync(argvFile, 'utf8').split('\n');
+  assert.ok(argv.includes('my_app'), 'the database name arrives whole');
+  assert.ok(argv.includes('-pp@ss w0rd'), 'a password with a space must survive quoting');
+  assert.ok(argv.includes('-ubackup') && argv.includes('db.internal'), 'user and host arrive');
+  assert.equal(zlib.gunzipSync(fs.readFileSync(outputFile)).toString(), 'CREATE TABLE t (id int);\n', 'the dump is at the path asked for, with a space in it');
 
   const svc = buildServiceStatusCommand('nginx');
   assert.ok(svc.includes("systemctl is-active 'nginx'"), 'a plain service name must still work');
@@ -209,6 +306,9 @@ function main() {
     testNoPayloadEverExecutes();
     testNumericArgumentsCannotCarryCommands();
     testProcessInfoRejectsNonNumericPid();
+    testHostKeyRemovalIsNotAShellCommand();
+    testCronLineCannotCarryAJob();
+    testBackupIdIsAFileName();
     testBenignValuesStillWork();
     console.log(`\n✅ backup/monitor injection tests passed (${passed} checks)`);
   } finally {

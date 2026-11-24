@@ -1,0 +1,198 @@
+// Runs only through --release-smoke-test, with an isolated directory supplied
+// by scripts/smoke-desktop.mjs. Exercise the packaged code, UI and native PTY.
+import assert from 'node:assert/strict';
+import { nativeLanguages, nativeText } from './locale.mjs';
+import { applicationMenuTemplate } from './native-menu.mjs';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
+
+const SHELL_MARKER = 'SSH_RELEASE_SMOKE_OK';
+
+/**
+ * Timestamped progress, on stdout and in a file next to the result.
+ *
+ * A packaged Windows smoke that took 3 s on 2026-09-07 took 40 s and then 47 s
+ * on 2026-09-24, and the second one hit the launcher's limit with nothing to
+ * say where the time went. The file survives a killed process; stdout does not
+ * reliably reach CI from a GUI-subsystem executable on Windows.
+ */
+function createStages() {
+  const started = Date.now();
+  const lines = [];
+  const file = `${process.env.SSH_RELEASE_SMOKE_RESULT}.progress`;
+  return name => {
+    const line = `${String(Date.now() - started).padStart(6)} ms  ${name}`;
+    lines.push(line);
+    console.log(`[release-smoke] ${line}`);
+    try { fs.writeFileSync(file, `${lines.join('\n')}\n`); } catch { /* progress is diagnostic only */ }
+  };
+}
+
+export function terminalSmokeCommand(shell) {
+  const name = shell.toLowerCase();
+  if (name === 'cmd.exe' || name === 'cmd') return 'echo SSH_RELEASE_^SMOKE_OK\r';
+  if (/^(powershell|pwsh)(\.exe)?$/.test(name)) return "Write-Output ('SSH_RELEASE_' + 'SMOKE_OK')\r";
+  return "printf 'SSH_RELEASE_%s\\n' 'SMOKE_OK'\r";
+}
+
+/** A PTY emits terminal controls, especially ConPTY; validate command output,
+ * not a particular cursor position or newline sequence. The command itself
+ * never contains the complete marker, so its input echo cannot pass the test.
+ */
+export async function verifyLocalTerminalSmoke(terminal, { timeoutMs = 10000, stage = () => {} } = {}) {
+  await new Promise((resolve, reject) => {
+    let output = '';
+    let done = false;
+    const timeout = setTimeout(() => {
+      terminal.kill();
+      reject(new Error(`Packaged ${terminal.shell} terminal did not return the command result (${output.length} PTY bytes received)`));
+    }, timeoutMs);
+    terminal.onExit(() => {
+      clearTimeout(timeout);
+      reject(new Error(`Packaged ${terminal.shell} terminal exited before returning the command result (${output.length} PTY bytes received)`));
+    });
+    terminal.onData(chunk => {
+      output = (output + chunk).slice(-16384);
+      // Output keeps arriving after the marker; report and resolve once.
+      if (!done && stripVTControlCharacters(output).includes(SHELL_MARKER)) {
+        done = true;
+        clearTimeout(timeout);
+        stage(`terminal returned the command result (${output.length} PTY bytes)`);
+        resolve();
+      }
+    });
+    terminal.write(Buffer.from(terminalSmokeCommand(terminal.shell)));
+  });
+  // A normal shell exit avoids ConPTY's asynchronous kill/enumeration race.
+  await new Promise(resolve => {
+    const timeout = setTimeout(() => {
+      // Logged before the call: on Windows a ConPTY teardown is the one step
+      // here that can block the main process outright, and then nothing after
+      // it runs to say so.
+      stage('shell did not exit within 2 s; killing it');
+      terminal.kill();
+      stage('kill returned');
+      resolve();
+    }, 2000);
+    terminal.onExit(() => { clearTimeout(timeout); stage('shell exited on its own'); resolve(); });
+    terminal.write(Buffer.from('exit\r'));
+  });
+}
+
+/**
+ * Start an engine the way an AI tool starts it from its settings, and ask it
+ * for its tools over MCP's stdio framing (one JSON-RPC message per line).
+ */
+export async function verifyEngineAnswers(engine, { timeoutMs = 30000, stage = () => {} } = {}) {
+  const child = spawn(engine.command, engine.args, {
+    env: { ...process.env, ...engine.env, SSH_LOG_LEVEL: 'ERROR' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096); });
+  const replies = new Map();
+  let buffer = '';
+  child.stdout.on('data', chunk => {
+    buffer += chunk;
+    let newline;
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      try { const message = JSON.parse(line); if (message.id !== undefined) replies.get(message.id)?.(message); } catch { /* not ours */ }
+    }
+  });
+  const send = message => child.stdin.write(`${JSON.stringify(message)}\n`);
+  const request = (id, method, params) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`The application's engine did not answer ${method} within ${timeoutMs / 1000} s: ${stderr.trim()}`)), timeoutMs);
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`The application's engine exited ${code} before answering ${method}: ${stderr.trim()}`)); });
+    replies.set(id, message => { clearTimeout(timer); resolve(message); });
+    send({ jsonrpc: '2.0', id, method, params });
+  });
+  try {
+    await request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'release-smoke', version: '1' } });
+    send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    const listed = await request(2, 'tools/list', {});
+    const names = (listed.result?.tools ?? []).map(tool => tool.name);
+    assert.ok(names.includes('ssh_execute'), `the application's engine lists its tools (got ${names.length})`);
+    stage(`application engine answered over MCP (${names.length} tools)`);
+  } finally {
+    child.stdin.end();
+    child.kill();
+  }
+}
+
+export async function runSmokeTest({ app, BrowserWindow, Menu, url, root, localShellProvider }) {
+  const stage = createStages();
+  stage('control plane started');
+  // Every language the application ships, found from its catalogues: the menu is built in each one.
+  for (const language of nativeLanguages) {
+    const help = nativeText('Help', {}, language);
+    const quit = nativeText('Quit SSH Manager', {}, language);
+    const menu = Menu.buildFromTemplate(applicationMenuTemplate({ isMac: process.platform === 'darwin', language }));
+    const items = menu.items.flatMap(item => [item, ...(item.submenu?.items || [])]);
+    assert.ok(items.some(item => item.label === help), 'localized native help menu: ' + language);
+    if (process.platform === 'darwin') {
+      assert.ok(items.some(item => item.label === quit), 'localized native application submenu: ' + language);
+    }
+  }
+  stage('native menus built in ' + nativeLanguages.join(', '));
+  const page = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, nodeIntegration: false } });
+  const failures = [];
+  page.webContents.on('render-process-gone', (_event, details) => failures.push(details.reason));
+  await page.loadURL(url);
+  stage('interface loaded');
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (await page.webContents.executeJavaScript('document.querySelector("#root")?.children.length > 0')) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(await page.webContents.executeJavaScript('document.querySelector("#root")?.children.length > 0'), true, 'packaged interface renders');
+  assert.deepEqual(failures, []);
+  stage('interface rendered');
+  // Options → AI tools offers this application's own engine, and that engine
+  // answers when an AI tool starts it: nothing else to install, npm included.
+  const base = new URL(url);
+  const agents = await (await fetch(`${base.origin}/api/agents${base.search}`)).json();
+  if (process.platform === 'linux' && process.env.APPIMAGE) {
+    assert.equal(agents.engines.app, null, 'an AppImage moves on every start: no engine is offered from it');
+  } else {
+    // What it must offer, worked out here rather than taken from the answer:
+    // this very binary, running the engine the application carries.
+    const own = { command: process.execPath, args: [path.join(root, 'src', 'index.js')], env: { ELECTRON_RUN_AS_NODE: '1' } };
+    assert.ok(agents.engines.app, 'the application offers its own engine to AI tools');
+    assert.equal(fs.realpathSync(agents.engines.app.command), fs.realpathSync(own.command));
+    assert.deepEqual(agents.engines.app.args.map(file => fs.realpathSync(file)), own.args.map(file => fs.realpathSync(file)));
+    assert.deepEqual(agents.engines.app.env, own.env);
+    assert.equal(agents.engines.app.version, app.getVersion());
+    await verifyEngineAnswers(own, { stage });
+  }
+  // The window's own updates (Options → Updates, the mark on the rail): the
+  // packaged application hands the control plane its updater, which reports the
+  // version that is running. The updater itself stays off in a smoke test.
+  const updates = await fetch(`${base.origin}/api/app-update${base.search}`);
+  assert.equal(updates.status, 200, 'the packaged application reports its updates');
+  const snapshot = await updates.json();
+  assert.equal(snapshot.currentVersion, app.getVersion());
+  assert.equal(snapshot.status, 'idle');
+  assert.equal(snapshot.channel, app.getVersion().includes('-') ? 'preview' : 'stable');
+  // The progress file is written from what the application itself knows, never
+  // from what a response said (the check above is what proves they agree).
+  stage(`application updates reported (running ${app.getVersion()})`);
+  const groups = await import(pathToFileURL(path.join(root, 'src/server-groups.js')).href);
+  groups.createGroup('release_smoke', ['fixture']);
+  assert.equal(fs.existsSync(path.join(root, '.server-groups.json')), false, 'groups must not write inside the application');
+  assert.equal(fs.existsSync(path.join(process.env.SSH_MANAGER_HOME, 'groups.json')), true);
+  stage('group written to user state');
+  const factory = localShellProvider();
+  assert.ok(factory, 'packaged node-pty loads');
+  const terminal = await factory({ cols: 80, rows: 24, cwd: process.env.SSH_MANAGER_HOME });
+  stage(`local terminal started (${terminal.shell})`);
+  await verifyLocalTerminalSmoke(terminal, { stage });
+  fs.writeFileSync(process.env.SSH_RELEASE_SMOKE_RESULT, JSON.stringify({ ok: true, version: app.getVersion(), platform: process.platform, arch: process.arch }));
+  stage('result written; quitting');
+  page.destroy();
+}

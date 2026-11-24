@@ -1,0 +1,151 @@
+/**
+ * The approval queue: what an agent wants to do, and your answer.
+ *
+ * This is the screen the whole control plane exists for. Everything else tells
+ * you what happened; this one is the moment you can still change it, so the
+ * command is shown in full, unwrapped and monospaced, and the two buttons say
+ * what they do rather than "OK" and "Cancel".
+ *
+ * A destructive request says so in words across the card, and its approve
+ * button is red and reads "Approve and run": the decision that cannot be undone
+ * should not look like the one that can.
+ */
+import { useState } from 'react';
+import { AlertTriangle, Check, Clock, ShieldCheck, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { CommandBlock } from '@/components/CommandBlock';
+import { state } from '@/lib/api';
+import { PageHeader } from '@/components/layout/PageHeader';
+import { EmptyState } from '@/components/layout/EmptyState';
+import { useWorkspace } from '@/stores/workspace';
+import { usePendingRequests } from '@/lib/use-pending';
+import { cn } from '@/lib/utils';
+import { tr, useLocale } from '@/lib/i18n';
+
+/** Seconds up to a minute, then minutes — nobody needs "waiting 143 s". */
+function formatWait(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+const MODE_LABEL = { readonly: 'read only', restricted: 'restricted', unrestricted: 'unrestricted' } as const;
+
+/**
+ * What a request without a command line asks for: its arguments. A deploy or an
+ * upload has no command, and a card that said only "(no command)" asked for a
+ * decision on files, target paths and, for a deploy, the command it runs
+ * afterwards, none of which the person could read. The server is left out: the
+ * card's header already names it.
+ */
+function argumentsText(args?: Record<string, unknown>): string | undefined {
+  if (!args || typeof args !== 'object') return undefined;
+  const { server: _server, ...rest } = args;
+  return Object.keys(rest).length ? JSON.stringify(rest, null, 2) : undefined;
+}
+
+export function WaitingPage() {
+  useLocale();
+  const setView = useWorkspace(state => state.setView);
+  const { pending, drop } = usePendingRequests();
+  const [deciding, setDeciding] = useState<string | null>(null);
+
+  const decide = async (id: string, approved: boolean) => {
+    setDeciding(id);
+    try {
+      await state.decide(id, approved);
+      drop(id);
+    } finally {
+      setDeciding(null);
+    }
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {/* The header stays even with nothing in the queue. Returning only the
+          empty state, as this used to, made the screen look like a different
+          application from the one next to it in the rail. */}
+      <PageHeader
+        title={tr("Waiting")}
+        count={pending.length}
+        hint={tr("An agent paused on these commands. Nothing runs until you decide.")}
+      />
+
+      {pending.length === 0 ? (
+        <EmptyState
+          icon={Clock}
+          title={tr("Nothing is waiting")}
+          // This screen used to explain where approval is configured and then
+          // leave you to find it. Saying "it is set on the server" to somebody
+          // looking at an empty queue is an instruction with no door attached.
+          hint={tr("Nothing pauses here until you ask it to. Open a server, set Approval to destructive or always, and its agent will stop and wait for you before acting.")}
+          action={
+            <Button size="sm" onClick={() => setView('servers')}>
+              <ShieldCheck className="h-3.5 w-3.5" />{tr("Set it up on a server")}</Button>
+          }
+        />
+      ) : (
+      <div className="min-h-0 flex-1 overflow-y-auto px-8 pb-10 pt-6">
+        <div className="flex max-w-5xl flex-col gap-4">
+        {pending.map(request => (
+          <article key={request.id} className="overflow-hidden rounded-xl border border-border bg-card">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-5 py-3.5">
+              <h2 className="text-base font-bold">{request.server}</h2>
+              <span className="font-mono text-[12.5px] text-muted-foreground">
+                {request.user}@{request.host}
+              </span>
+              <span className="inline-flex h-6 items-center rounded-md border border-border px-2 font-mono text-xs text-muted-foreground">
+                {request.tool}
+              </span>
+              {request.mode !== 'unrestricted' && (
+                <span className="inline-flex h-6 items-center rounded-md bg-secondary px-2 text-xs text-secondary-foreground">
+                  {tr(MODE_LABEL[request.mode])}
+                </span>
+              )}
+              {/* How long an agent has been blocked is the number that decides
+                  whether you answer now or finish your sentence first. */}
+              <span className="ml-auto inline-flex items-center gap-1.5 text-[13px] text-muted-foreground tabular-nums">
+                <Clock className="h-3.5 w-3.5" aria-hidden="true" />{tr("waiting")} {formatWait(request.waitingMs)}
+              </span>
+            </div>
+
+            {request.destructive && (
+              <div className="flex items-start gap-2.5 bg-destructive-light px-5 py-3 text-sm text-destructive">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <p><b>{tr("Destructive.")}</b> {tr("This command can delete or overwrite data, and nothing on the server will undo it.")}</p>
+              </div>
+            )}
+
+            {/* Wrapped, not truncated: half a command is how you approve the
+                wrong thing. */}
+            <div className="px-5 py-4">
+              <CommandBlock command={request.command || argumentsText(request.args)} className="rounded-lg border border-border py-3 pl-4 pr-2" />
+            </div>
+
+            <div className="flex flex-wrap justify-end gap-2.5 px-5 pb-4">
+              <Button
+                variant="outline"
+                className="h-11 px-5 font-bold"
+                disabled={deciding === request.id}
+                onClick={() => void decide(request.id, false)}
+              >
+                <X className="h-4 w-4" />{tr("Refuse")}</Button>
+              <Button
+                variant={request.destructive ? 'destructive' : 'default'}
+                className={cn('h-11 px-5 font-bold')}
+                disabled={deciding === request.id}
+                onClick={() => void decide(request.id, true)}
+              >
+                <Check className="h-4 w-4" />
+                {request.destructive ? tr("Approve and run") : tr("Approve")}
+              </Button>
+            </div>
+          </article>
+        ))}
+        </div>
+      </div>
+      )}
+    </div>
+  );
+}

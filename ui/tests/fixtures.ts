@@ -1,0 +1,85 @@
+import { test as base, expect } from '@playwright/test';
+import { spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const entry = fileURLToPath(new URL('./control-plane.mjs', import.meta.url));
+export const legacyConfig = 'SSH_SERVER_LEGACY_HOST=127.0.0.1\nSSH_SERVER_LEGACY_PORT=9\nSSH_SERVER_LEGACY_USER=fixture\nSSH_SERVER_LEGACY_PASSWORD=fixture-only-secret\nSSH_SERVER_LEGACY_PROXYJUMP=bastion\nSSH_SERVER_LEGACY_MODE=restricted\nSSH_SERVER_LEGACY_ALLOW_PATTERNS=^uptime$\n';
+
+type App = { url: string; home: string; approvalSocket: string; restart: () => Promise<void>; stop: () => Promise<void> };
+export const test = base.extend<{ app: App; legacy: boolean; offerDesktop: boolean; appUpdates: boolean; localShell: boolean; logOutput: boolean; agentSocket: boolean; language: string | null }>({
+  legacy: [false, { option: true }],
+  // An SSH agent visible to the control plane (SSH_AUTH_SOCK set), as a desktop application on
+  // macOS or Linux usually has one; the default is none, as on Windows without an agent.
+  agentSocket: [false, { option: true }],
+  language: ['en', { option: true }],
+  // A control plane started as `ssh-manager control` starts it: offering the
+  // desktop application, here a stand-in that installs nothing.
+  offerDesktop: [false, { option: true }],
+  // The control plane of the desktop application, whose updater is a stand-in.
+  appUpdates: [false, { option: true }],
+  // A shell on this machine, as the desktop application offers one; a stand-in
+  // that records what it is sent in typed.txt.
+  localShell: [false, { option: true }],
+  // Output kept in the command history, which it is not by default.
+  logOutput: [false, { option: true }],
+  app: async ({ legacy, offerDesktop, appUpdates, localShell, logOutput, agentSocket, language }, use) => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'ui-v4-'));
+    if (language) await fs.writeFile(path.join(home, 'preferences.json'), JSON.stringify({ 'ssh-manager.language': language }));
+    // Windows's default named pipe is global, even when HOME is isolated.
+    // Give concurrent workers their own approval pipe and derived stream pipe.
+    const approvalSocket = process.platform === 'win32'
+      ? `\\\\.\\pipe\\mcp-ssh-${path.basename(home)}` : path.join(home, 'approval.sock');
+    if (legacy) await fs.writeFile(path.join(home, '.env'), legacyConfig);
+    let child: ChildProcess;
+    let output = '';
+    // Handed to tests that stand in for an engine: approval requests go to this
+    // socket, and stream events to the one beside it (src/live-stream.js).
+    const app: App = { home, url: '', approvalSocket, restart: async () => { await app.stop(); await start(); }, stop: async () => {
+      if (!child || child.exitCode !== null || child.signalCode !== null) return;
+      await new Promise<void>(resolve => {
+        const deadline = setTimeout(() => child.kill('SIGKILL'), 5000);
+        child.once('exit', () => { clearTimeout(deadline); resolve(); });
+        child.kill('SIGTERM');
+      });
+    } };
+    async function start() {
+      child = spawn(process.execPath, [entry], {
+        cwd: home,
+        env: {
+          PATH: process.env.PATH,
+          ...(process.platform === 'win32' ? { SystemRoot: process.env.SystemRoot, USERPROFILE: home, TEMP: home, TMP: home } : {}),
+          HOME: home, SSH_MANAGER_HOME: home, SSH_MANAGER_KEY_SOURCE: 'file',
+          SSH_MANAGER_APPROVAL_SOCKET: approvalSocket,
+          SSH_ENV_PATH: path.join(home, '.env'), SSH_CONFIG_PATH: path.join(home, 'absent.toml'),
+          SSH_LOG_FILE: path.join(home, 'test.log'), SSH_GROUPS_FILE: path.join(home, 'groups.json'),
+          ...(offerDesktop ? { UI_TEST_OFFER_DESKTOP: '1' } : {}),
+          ...(appUpdates ? { UI_TEST_APP_UPDATES: '1' } : {}),
+          ...(localShell ? { UI_TEST_LOCAL_SHELL: '1' } : {}),
+          ...(logOutput ? { SSH_MANAGER_LOG_OUTPUT: '1' } : {}),
+          ...(agentSocket ? { SSH_AUTH_SOCK: path.join(home, 'agent.sock') } : {}),
+        },
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      });
+      child.stdout?.on('data', chunk => { output += chunk; });
+      child.stderr?.on('data', chunk => { output += chunk; });
+      await new Promise<void>((resolve, reject) => {
+        const deadline = setTimeout(() => reject(new Error(`Control plane startup timed out: ${output}`)), 10_000);
+        child.once('error', error => { clearTimeout(deadline); reject(error); });
+        child.once('exit', code => { clearTimeout(deadline); reject(new Error(`Control plane exited ${code}: ${output}`)); });
+        child.on('message', (message: { url?: string }) => {
+          if (message.url) { app.url = message.url; clearTimeout(deadline); resolve(); }
+        });
+      });
+    }
+    try { await start(); await use(app); }
+    finally { await app.stop(); await fs.rm(home, { recursive: true, force: true }); }
+  },
+});
+export { expect };
+export function apiUrl(app: { url: string }, endpoint: string) {
+  const base = new URL(app.url);
+  return `${base.origin}${endpoint}${endpoint.includes('?') ? '&' : '?'}${base.search.slice(1)}`;
+}

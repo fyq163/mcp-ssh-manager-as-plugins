@@ -27,6 +27,20 @@ if (!existsSync(bashScript)) {
 const isWindows = platform() === 'win32';
 const args = process.argv.slice(2);
 
+// These commands are native Node and also work on Windows without Git Bash.
+const nativeCommands = { control: 'control.js', vault: 'vault.js', import: 'portability.js', export: 'portability.js', app: 'app.js', guard: 'guard.js', codex: 'codex.js' };
+if (Object.hasOwn(nativeCommands, args[0])) {
+  const commandArgs = ['import', 'export'].includes(args[0]) ? args : args.slice(1);
+  const result = spawnSync(process.execPath, [join(__dirname, nativeCommands[args[0]]), ...commandArgs], { stdio: 'inherit' });
+  if (result.error) console.error(`[ssh-manager] ${result.error.message}`);
+  process.exit(result.status ?? 1);
+}
+
+// No "new in v4" invitation, not even once. Someone who uses the CLI and the
+// npm engine as they always have gets exactly that: the interface and the
+// desktop app are one key away in the menu (a) for whoever wants them, and say
+// nothing to whoever does not.
+
 /**
  * Convert a Windows-style path (C:\foo\bar) into a POSIX-style path
  * understood by Git Bash / MSYS (/c/foo/bar). Leaves non-Windows paths alone.

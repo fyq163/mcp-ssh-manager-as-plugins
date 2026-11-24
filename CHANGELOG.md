@@ -5,6 +5,962 @@ All notable changes to MCP SSH Manager will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [4.3.4] - 2026-11-23
+
+**A security release: upgrade.** `ssh_download` wrote any local path it was given,
+including for servers in `readonly` or `restricted` mode
+([GHSA-2v9g-gm8g-mxgj](https://github.com/bvisible/mcp-ssh-manager/security/advisories/GHSA-2v9g-gm8g-mxgj),
+high, found by the maintainer). Every release from 3.0.0 is affected. **One thing
+behaves differently on purpose:** a download from a `readonly` or `restricted`
+server is now refused outside `~/.ssh-manager/transfers`; if you download to a
+folder of your own, set `TRANSFER_ROOT` for that server (see below). Nothing else
+changes (the release pipeline upgrades 3.8.5, 3.8.6, 3.8.7, every 4.0.x, 4.1.0,
+4.2.0, 4.3.0, 4.3.1, 4.3.2 and 4.3.3 from the registry to this version and back).
+
+The Windows installer is still **not Authenticode-signed**, for the same reason
+as 4.0.0: Windows shows *"Windows protected your PC"*, *More info → Run anyway*,
+and `ssh-manager app` checks the installer against the SHA-256 in
+`release-manifest-win32.json`. macOS builds are signed and notarized.
+
+### Security
+
+- **A server in `readonly` or `restricted` mode can no longer have a download written
+  anywhere on this machine.** `ssh_download` writes a local file and never looked at
+  the path, in any mode, and is not blocked in `readonly` or `restricted` because it
+  changes nothing on the server. An agent that cannot run a command on such a server
+  could still create a file there (a redirect to `/tmp` is allowed in `readonly`) and
+  download it over `~/.zshrc`, or into `~/.ssh/authorized_keys`, which a later shell
+  or login then ran. The local side of a transfer now has a **transfer root**: a
+  `readonly` or `restricted` server downloads into `~/.ssh-manager/transfers` (made
+  the first time, private to you; a relative local path is read from it), and any
+  server can name its own folder with `SSH_SERVER_<NAME>_TRANSFER_ROOT` (TOML:
+  `transfer_root`), which then also holds `ssh_upload` and `ssh_sync` to it. A path is
+  judged by where it really is after following links, a link as the file is refused,
+  and a download is received beside its place and moved there, so a failed one leaves
+  no half file. Servers in `unrestricted` mode with no root are not filtered, as
+  before. **If you download from a `readonly` or `restricted` server to a folder of
+  your own, set `TRANSFER_ROOT` to it**: a download elsewhere is refused with a message
+  that names the folder. Found while comparing this project with another SSH server
+  for MCP that confines its transfers the same way.
+
+## [4.3.3] - 2026-11-21
+
+**A security release: upgrade if you use `restricted` mode.** On a server in
+`restricted` mode, a command could be hidden from the allowlist and still run
+([GHSA-86xm-rv3h-r4f2](https://github.com/bvisible/mcp-ssh-manager/security/advisories/GHSA-86xm-rv3h-r4f2),
+high, reported by @Fastyyy123). Every release from 3.8.6 is affected. Servers in
+`readonly` mode and servers without a mode are not (nothing else changes; the
+release pipeline upgrades 3.8.5, 3.8.6, 3.8.7, every 4.0.x, 4.1.0, 4.2.0, 4.3.0,
+4.3.1 and 4.3.2 from the registry to this version and back).
+
+The Windows installer is still **not Authenticode-signed**, for the same reason
+as 4.0.0: Windows shows *"Windows protected your PC"*, *More info → Run anyway*,
+and `ssh-manager app` checks the installer against the SHA-256 in
+`release-manifest-win32.json`. macOS builds are signed and notarized.
+
+### Security
+
+- **`restricted` mode no longer lets a command hide from the allowlist**
+  (GHSA-86xm-rv3h-r4f2, reported by @Fastyyy123). The allowlist is checked against
+  each command the line runs, found by reading the line, and the reader did not
+  recognise comments: a quote or a trailing backslash in one made it see fewer
+  commands than the shell ran, so `echo x # it's` followed by a line with `touch`
+  and a second apostrophe ran `touch` on a server that allowed only `^echo`. Looking
+  for the same thing in other places found four more ways, fixed together: a
+  here-document body that opens a quote; an ANSI-C quote (`$'a\'b'`, which ends
+  at a different place in dash than in bash, ksh and zsh); a `${…}` that is more than
+  a plain name, which includes `${ command; }` of ksh and bash 5.3; and parentheses,
+  which zsh and fish read as commands (`echo =(touch x)`), reachable when the login
+  shell reads the line, that is with `timeout: 300000` or in a session. Comments are
+  now read as comments and left out of the command they follow (so an apostrophe or
+  a `;` in a comment is no longer a refusal), and the other four are refused with a
+  reason. Unquoted parentheses, here-documents, `$'…'` and `${x:-word}` in a command
+  that `restricted` mode allows were never reliable, and are now refused. `readonly`
+  mode is not affected: it also tests the whole line. A new test runs random lines
+  through the policy and the shells of the machine (sh, dash, bash, zsh) and fails if
+  one the policy allows runs a command it never checked.
+
+## [4.3.2] - 2026-11-21
+
+**A fix to the Live page.** A command that did not finish, because its call timed
+out or its connection dropped, stayed on "running" until the control plane was
+restarted ([#159](https://github.com/bvisible/mcp-ssh-manager/issues/159), thanks to
+@TillNano). It is a display problem only: the commands, their results, the audit
+log and approvals were never affected. Nothing else changes (the release pipeline
+upgrades 3.8.5, 3.8.6, 3.8.7, every 4.0.x, 4.1.0, 4.2.0, 4.3.0 and 4.3.1 from the
+registry to this version and back).
+
+The Windows installer is still **not Authenticode-signed**, for the same reason
+as 4.0.0: Windows shows *"Windows protected your PC"*, *More info → Run anyway*,
+and `ssh-manager app` checks the installer against the SHA-256 in
+`release-manifest-win32.json`. macOS builds are signed and notarized.
+
+### Fixed
+
+- **A command that did not finish no longer stays "running" on the Live page**
+  (#159, thanks to @TillNano, who traced it to the line). When an `ssh_execute`
+  call threw instead of returning, a timeout or a dropped connection, the engine
+  never told the control plane the command had ended: the entry read "running"
+  until the control plane restarted, and the stream's socket stayed open, one of
+  each per failed command for as long as the application ran. The engine now
+  closes the stream however the call ends, reporting `exit -1` (the code the
+  reply to the agent already carries) when there is no exit code, and the control
+  plane ends an entry itself when its connection closes without an end event, as
+  when the engine is killed or its client is closed mid-command. The command, its
+  result, the audit log and the approval were never affected.
+
+## [4.3.1] - 2026-11-20
+
+**A security release: upgrade.** An `ssh_deploy` request showed no command on the
+approval card, so what it was going to do could not be read
+([GHSA-vx67-5jmh-4xq2](https://github.com/bvisible/mcp-ssh-manager/security/advisories/GHSA-vx67-5jmh-4xq2),
+moderate, reported by @Fastyyy123). Every release from 3.0.0 is affected; nothing
+else changes (the release pipeline upgrades 3.8.5, 3.8.6, 3.8.7, every 4.0.x,
+4.1.0, 4.2.0 and 4.3.0 from the registry to this version and back).
+
+The Windows installer is still **not Authenticode-signed**, for the same reason
+as 4.0.0: Windows shows *"Windows protected your PC"*, *More info → Run anyway*,
+and `ssh-manager app` checks the installer against the SHA-256 in
+`release-manifest-win32.json`. macOS builds are signed and notarized.
+
+### Security
+
+- **The approval card shows what a deploy or an upload is going to do**
+  (GHSA-vx67-5jmh-4xq2, reported by @Fastyyy123). A request without a command line
+  read "(no command)", so someone approving an `ssh_deploy` could not see its files,
+  their target paths, or its `restart` option, which runs as a shell command on the
+  server as the SSH user (the Deployment Guide has always shown it as one, while the
+  tool description called it a service). The card now shows the arguments the engine
+  sent, with every secret already removed, and the tool description and the guide
+  say what `restart` is. `restart` itself is unchanged, because existing deployments
+  pass commands such as `cd /opt/app && ./bin/restart`; `readonly` and `restricted`
+  servers still refuse `ssh_deploy`.
+
+## [4.3.0] - 2026-11-19
+
+**French and Japanese interfaces, the SSH agent key in the server form, and long
+commands shown in full.** Nothing to change on upgrade: the tools of the engine are
+the same (its only change is one boolean added to the interface's `/api/options`),
+and the release pipeline upgrades 3.8.5, 3.8.6, 3.8.7, every 4.0.x, 4.1.0 and 4.2.0
+from the registry to this version and back. One thing does behave differently
+without being asked: the interface and the desktop menus follow a French or a
+Japanese system language until you choose one, as they already did for Chinese.
+
+The Windows installer is still **not Authenticode-signed**, for the same reason
+as 4.0.0: Windows shows *"Windows protected your PC"*, *More info → Run anyway*,
+and `ssh-manager app` checks the installer against the SHA-256 in
+`release-manifest-win32.json`. macOS builds are signed and notarized.
+
+Three of these came from people who read the project closely: thanks to
+@zenk-sugimoto (the Japanese interface), @TillNano (the agent key in the form) and
+@congzhou09 (whole commands in Live and Activity).
+
+### Added
+
+- **A French interface (Français), and a way to add any other language in minutes.**
+  *Options → Appearance → Language* now offers Français, and the desktop menus,
+  dialogs and notifications follow it (the Windows installer has a French page).
+  Languages are no longer listed anywhere in the code: the interface and the desktop
+  application find their catalogues in their folders, the selector is built from what
+  they find, and the tests loop over what exists. `npm run lang -- add <code>` creates
+  a language's three files from the English text, and `npm run lang -- status` shows
+  how much of each is still English; the steps are in `ui/README.md`, "Adding a
+  language". A system language is matched by its exact tag, else its family (`fr-CH`
+  uses French), else English; nothing changes for a language that is not shipped.
+- **The server form can name an SSH agent key** (#148, thanks to @TillNano).
+  *Agent public key*, in the authentication section, takes the path of a `.pub`
+  file: the engine then offers only that identity from your SSH agent and signs
+  with it, so the private key never reaches the engine (the setting existed since
+  4.1.0, but only in `.env`, TOML or the environment, which left a server managed
+  in the interface with no way to use it). The engine refuses an agent key
+  together with a password, a private key or agent forwarding, so the form
+  disables the others while one is chosen, says why when the agent key field is
+  the one that is closed, and tells you that saving removes a password or a key
+  already saved for that server. It warns when this application sees no SSH agent
+  (`SSH_AUTH_SOCK` empty): the interface's `/api/options` now says whether one is
+  visible. Nothing changes for a server that does not use it.
+- **A Japanese interface (日本語).** *Options → Appearance → Language* now offers
+  English, 简体中文 and 日本語, for the desktop application and the web interface;
+  the desktop menus, dialogs and notifications follow it, and the Windows installer
+  has Japanese and Chinese pages. Until you choose, a Japanese system or browser
+  language selects Japanese, as a Chinese one selects Chinese; the choice is
+  remembered and English is exactly as it was. The translation is @zenk-sugimoto's
+  (#149): thank you. Japanese is set in Japanese fonts only, Chinese in Chinese
+  fonts only, because the same Han characters are drawn differently in the two.
+
+### Fixed
+
+- **Live and Activity show the whole command.** A long command was cut off with an
+  ellipsis on both pages, and an Activity → Commands entry could only be opened when
+  its output had been recorded (`SSH_MANAGER_LOG_OUTPUT=1`, off by default), so in
+  practice you could not read what an agent had run. A row keeps its one-line
+  overview, with the full command as its tooltip; opening it shows the command in
+  full, wrapped, with the copy button of the approval card. Every Commands entry now
+  opens, several can stay open together, and an open entry no longer collapses or
+  loses a text selection when a new one arrives. By @congzhou09 (#151): thank you.
+
+## [4.2.0] - 2026-11-13
+
+**A Chinese interface, a fuller audit log, and a guard against raw ssh.** Nothing
+to change on upgrade: the guard and the background mode are off unless you use
+them, and the audit log only gains lines when `AUDIT_LOG` is already on (the
+release pipeline upgrades 3.8.5, 3.8.6, 3.8.7 and every 4.0.x and 4.1.x from the
+registry to this version and back). Two things do behave differently without
+being asked: a tool that fails now sets `isError` in its reply, and the interface
+follows a Chinese system language until you choose one.
+
+The Windows installer is still **not Authenticode-signed**, for the same reason
+as 4.0.0: Windows shows *"Windows protected your PC"*, *More info → Run anyway*,
+and `ssh-manager app` checks the installer against the SHA-256 in
+`release-manifest-win32.json`. macOS builds are signed and notarized.
+
+Many of these came from reading what the forks of this project changed: thanks
+to @jaredshuai, @SEU-zhc, @fyq163 and @xutianhao6 for the work and the ideas.
+
+### Added
+
+- **`ssh-manager codex setup` and `ssh-manager codex status`.** `setup` points
+  OpenAI Codex at this engine: only the `ssh-manager` table of
+  `~/.codex/config.toml` is replaced, the rest of the file stays, the entry names
+  the npm engine, and a second run changes nothing; without an npm install it says
+  how to get one and writes nothing. `status` says what Codex runs today. They were
+  documented (with `migrate`, `test` and `convert`, which have no meaning with the
+  V4 engine; `ssh-manager export servers.toml` writes the servers as TOML) and none
+  of them existed. The entry that `ConfigLoader.saveToCodexConfig` wrote named
+  `<current directory>/src/index.js`, a file that exists only in a source checkout,
+  so for an npm install Codex started no engine; it now names the module's own
+  folder. Found thanks to @jaredshuai's fork.
+- **A Chinese interface (简体中文).** Options → Appearance has a *Language / 语言*
+  selector, for the desktop application and the web interface; the desktop menus,
+  dialogs and notifications follow it. Until you choose, the interface follows the
+  system language (Chinese for a `zh` locale, English for anything else), and the
+  choice is remembered. English is exactly as it was. Server names, commands,
+  paths and what a remote host prints are never translated. The translation is
+  @xutianhao6's, from his fork's community build: adapted here, completed for the
+  strings it missed and proofread. Thank you.
+- **`ssh_execute` with `background: true`** starts a command detached from the
+  SSH session and returns at once with `{ pid, logFile }`, for a job that
+  outlives the timeout (a training run, a long build). Read its output with
+  `ssh_tail` (`follow: false`), check or stop it with `ssh_process_manager`.
+  The log file is never chosen by the caller: a free path would let a command
+  that passes the `readonly` policy overwrite any file the SSH user can write,
+  so the engine creates a private one with `mktemp`. The launcher works under a
+  csh or tcsh login shell; Windows targets are refused with a clear error. The
+  idea is @SEU-zhc's.
+- **`ssh-manager guard`**, an opt-in hook for Claude Code that refuses (or, with
+  `--mode ask`, asks about) `ssh`, `scp`, `sftp` and a remote `rsync` run from the
+  agent's own shell, where the approval, the policy and the audit log do not
+  apply, and tells the agent which MCP tool to use. `install` edits only its own
+  entry in `~/.claude/settings.json` (a copy is kept the first time), `remove`
+  restores the file, `print` and `status` write nothing. It reads the command
+  text: a guard against accidents, not a security boundary. The idea is
+  @fyq163's, whose hook only reminded.
+- **`SSH_LOG_STDERR=false`** keeps the engine silent on stderr, for a client that
+  draws a terminal interface on that stream (OpenCode and Kilo were the
+  reports). The log file still receives the log lines; nothing changes unless
+  the variable is set. The idea is @fyq163's.
+
+### Changed
+
+- **With `AUDIT_LOG` set, every tool that targets the server records its
+  outcome**, not only a denial or an approval decision: `ssh_tail`, `ssh_sync`,
+  `ssh_deploy`, `ssh_db_*`, `ssh_backup_*`, `ssh_process_manager` and the rest now
+  leave a line with `success`, and `error` when they failed. A tool that records
+  its own exit code still writes exactly one line. Tools that only read local
+  state (server list, aliases, tunnel list) leave none. The design is
+  @jaredshuai's.
+- **A tool that fails now says so in the MCP reply**: the 36 tools that answered
+  "❌ … failed" as plain text now also set `isError`, which is what a client
+  expects (and what the audit log needs to tell a failure from a success).
+
+### Fixed
+
+- **A failed dump no longer reports success.** `mysqldump … | gzip > file` (and
+  `pg_dump`) reports the exit code of its last command: with a wrong password, a
+  missing database or a full disk the dump died, gzip still succeeded, and
+  `ssh_db_dump` and `ssh_backup_create` answered success with an empty archive of
+  20 bytes. The cron script made by `ssh_backup_schedule` did the same every night,
+  and its retention cleanup then deleted the good archives. A dump that fails now
+  fails, with the dump program's own message, and leaves no file; the dump still
+  streams, with no temporary file. The cron script has `set -o pipefail`, removes a
+  failed archive and stops before the cleanup. Found thanks to @jaredshuai's fork.
+- **A corrupt archive is no longer restored in part.** `gunzip -c dump.gz | mysql`
+  ran the database program on whatever gunzip had read, so a truncated archive was
+  restored half-way with no error. A gzip file is now tested whole before
+  `ssh_db_import` or `ssh_backup_restore` start the database program (MySQL and
+  PostgreSQL). A plain dump under a `.gz` name, which a backup made without
+  compression used to leave, is still restored.
+- **A MongoDB backup can be restored.** It was written as `<id>.tar.gz` but
+  measured and restored as `<id>.gz`: a size of 0 and no way back. One place now
+  knows the path, a restore checks the file is there before it starts, and
+  archives made by older versions (they were already `<id>.tar.gz`) become
+  restorable. `ssh_db_dump` reports the path it really wrote.
+- **`ssh-manager server remove prod` removes `prod`, not `prod_eu` too.** The CLI
+  matched a server's lines by the bare prefix `SSH_SERVER_PROD_`, which every
+  longer name starts with, so the other server lost its host, user and password.
+  Lines are now matched by the setting names the engine reads. Found thanks to
+  @jaredshuai's fork.
+- **Editing a server from the CLI keeps its settings.** It deleted all the
+  server's lines and wrote seven back, so a read-only server became unrestricted:
+  its mode, allow and deny patterns, audit log, group and proxy jump were dropped.
+  Only the settings the wizard asks for are replaced now, in place.
+- **A password with a `#` survives the CLI.** `ssh-manager server add` wrote
+  `a#b c"d` bare, and the engine read it back as `a` (dotenv starts a comment at
+  any `#`). A value is quoted only when dotenv would misread it, so every other
+  value is written exactly as before; one that cannot be carried is refused with a
+  reason and nothing is written.
+- **The health check no longer counts container layers as disks.** On a Docker
+  host every `overlay` layer repeated the same usage, and `tmpfs`, `devtmpfs` and
+  `squashfs` mounts counted as full disks (a snap mount is always at 100 %), which
+  raised duplicate or false disk alerts. The check now records each mount's
+  filesystem type and skips those, keeping `/` even inside a container, and an
+  alert fires when usage reaches the threshold, not only when it passes it. In the
+  interface, the health card keeps long mount paths and alert text inside its
+  borders. Thanks to @xutianhao6.
+- **Remote tunnels (`ssh_tunnel_create` with `type: "remote"`, `ssh -R`) never
+  worked**: they failed with `this.ssh.forwardIn is not a function`, because the
+  connection wrapper only had `forwardOut`. They work now, and closing one
+  cancels the forward and removes its listener. A failed creation is reported as
+  an error. Found thanks to @jaredshuai's fork.
+- **Six simultaneous calls on a cold engine opened six SSH connections**, all kept
+  open and five of them unreachable, a burst of logins that a server's
+  `MaxStartups` or fail2ban can refuse. Callers now wait for the connection being
+  established; a failed attempt is not remembered. Found thanks to
+  @jaredshuai's fork.
+
+### Security
+
+- **A database password no longer reaches the audit log or the approval request
+  in clear text.** `dbPassword` and `db_password` (taken by the backup, restore,
+  dump and import tools) were missing from a list of names to redact, so a
+  refused or approved call wrote the password into the audit file and showed it
+  in the approval request. The audit log now redacts any key that looks like a
+  secret, with the same rule as the logger. Found thanks to @jaredshuai's fork.
+
+## [4.1.0] - 2026-11-13
+
+**Choose the agent key per server, and sudo in the audit log.** Nothing to
+change on upgrade: the new option is off unless you set it, and the audit log
+only gains lines when `AUDIT_LOG` is already on (the release pipeline upgrades
+3.8.5, 3.8.6, 3.8.7 and every 4.0.x from the registry to this version and back).
+
+The Windows installer is still **not Authenticode-signed**, for the same reason
+as 4.0.0: Windows shows *"Windows protected your PC"*, *More info → Run anyway*,
+and `ssh-manager app` checks the installer against the SHA-256 in
+`release-manifest-win32.json`. macOS builds are signed and notarized.
+
+### Added
+
+- **Pick which key of the SSH agent a server uses** (#128, thanks to
+  @RebornOnce). When the agent holds many keys (a password manager's agent,
+  say), a server can hit `MaxAuthTries` and close the connection before the
+  right one is offered. `agent_public_key_path` in TOML, or
+  `SSH_SERVER_<NAME>_AGENT_PUBLIC_KEY_PATH` in `.env`, names a public key file:
+  only that identity is offered and used for signing, and the private key never
+  leaves the agent. If the agent does not hold it, the connection fails instead
+  of trying the others. It cannot be combined with a key, a password, a
+  certificate or agent forwarding, and nothing changes for servers without it.
+  `ssh_sync` uses the system's `ssh`, which takes `IdentityFile` and
+  `IdentitiesOnly yes` from your SSH configuration instead.
+- **`llms-install.md`**: the steps an agent follows to set the server up for its
+  user (Node, the client entry, servers described in `~/.ssh-manager/.env` with
+  a key and never a password typed into the conversation, then a check). It is
+  what the Cline MCP Marketplace asks for, and any agent can follow it.
+
+### Fixed
+
+- **The audit log records what `sudo` commands did** (#133, reported by
+  @revert12; #134, thanks to @orshih6). With `AUDIT_LOG` set, only
+  `ssh_execute` and `ssh_upload` wrote their outcome: a command run through
+  `ssh_execute_sudo` that the policy allowed left no line at all. It now records
+  the exit code and success (the logged arguments are the command and the
+  working directory, never the password), and so do `ssh_download`,
+  `ssh_execute_group` (one line per server) and commands sent to a persistent
+  session (success only: sessions report no exit code). Other tools still record
+  only a denial or an approval decision.
+
+### Security
+
+- **The desktop build uses a fixed `minimatch`.** `electron-builder`, the tool
+  that builds the desktop app, pulled `minimatch` 10.2.6 and 9.0.9, open to a
+  denial of service through crafted glob patterns (GHSA-g3hv-75wg-m249). Nothing
+  was exposed: the tool only reads the patterns of our own build configuration,
+  and no copy of `minimatch` ships in the app or in the npm package. An npm
+  `overrides` entry in `desktop/electron/package.json` now resolves those copies
+  to 11.x; a build with it contains the same files as one without, the
+  `package.json` line aside. Remove the entry once `app-builder-lib` itself
+  requires `minimatch` 11.0.1 or later.
+
+- **`@hono/node-server` 2.1.8 and `hono` 4.13.18 in the lockfile.** Two
+  moderate advisories for the first (GHSA-qv5m-9pm6-hqp3, GHSA-jpvv-r467-5p4w),
+  five for the second (four moderate, one low: GHSA-46wx-v44x-9hh2,
+  GHSA-4h7h-rv7c-7m2v, GHSA-4m76-xfj5-7975, GHSA-h7mg-cq63-vhpq,
+  GHSA-3gg2-335m-rxc6). The MCP SDK pulls both for its HTTP transport; the
+  stdio server this package runs never imports them, so nothing was exposed.
+
+## [4.0.3] - 2026-11-05
+
+**A security release: upgrade.** `ssh_db_query` could run shell commands on
+the server ([GHSA-qmf5-hrhv-5hjm](https://github.com/bvisible/mcp-ssh-manager/security/advisories/GHSA-qmf5-hrhv-5hjm),
+high, reported by @orshih6). Every earlier version is affected; nothing else
+changes (the release pipeline upgrades 3.8.5, 3.8.6, 3.8.7, 4.0.0, 4.0.1 and
+4.0.2 from the registry to this version and back).
+
+The Windows installer is **not Authenticode-signed** in this release either,
+for the same reason as 4.0.0: Windows shows *"Windows protected your PC"*,
+*More info → Run anyway*, and `ssh-manager app` checks the installer against
+the SHA-256 in `release-manifest-win32.json`. macOS builds are signed and notarized.
+
+### Security
+
+- **`ssh_db_query` no longer lets the database client reach a shell.** The tool
+  is read-only, so it is allowed on servers in `readonly` and `restricted` mode
+  and never held for approval. Its SQL went to the remote `psql` or `mysql`
+  client as the client's input, and both clients act on commands of their own
+  found there: `\!` runs a shell command, psql's `\o |command` pipes to one,
+  mysql's `system` does at the start of a line. A query such as
+  `SELECT 1 \! <command>` passed the SELECT-only check, so a read-only query
+  could run anything as the SSH user, and an agent misled by what it read could
+  do it on a server meant to be read-only.
+  - **PostgreSQL**: each statement is now a single-quoted `-c` argument, which
+    psql sends to the server as it is, inside the same read-only transaction.
+    Multi-line queries and backslashes in literals keep working.
+  - **MySQL / MariaDB**: the client reads its commands even from `-e`, and no
+    option to turn them off exists in every client, so a MySQL query must now be
+    one line without backslashes (and without other control characters). The
+    error says so.
+  - `tests/test-db-client-commands.js` runs the report's payloads through the
+    real engine, over SSH, to a server in readonly mode, against a real psql and
+    a real MariaDB client: queries answer, no payload reaches a shell.
+
+## [4.0.2] - 2026-11-01
+
+**Commands reach a Mac, and the desktop terminal behaves like your own.**
+A patch release: no setting, file or default changes for anyone upgrading
+(the release pipeline upgrades 3.8.5, 3.8.6, 3.8.7, 4.0.0 and 4.0.1 from the
+registry to this version and back). The desktop app updates itself from 4.0.x.
+
+The Windows installer is **not Authenticode-signed** in this release either,
+for the same reason as 4.0.0 (the public certificate waits on the company's
+registration): Windows shows *"Windows protected your PC"*, *More info → Run
+anyway*, and `ssh-manager app` checks the installer against the SHA-256 in
+`release-manifest-win32.json`. macOS builds are signed and notarized.
+
+### Fixed
+
+- **Commands sent to a macOS server no longer fail before they start** (#115,
+  thanks to Henrik Tilly, @htilly). Every bounded command (`ssh_execute` and the
+  tools built on it) was wrapped in `timeout`, which a stock Mac does not have:
+  it failed with exit 127, `timeout: command not found`, whatever the command
+  was. The wrapper now finds `timeout` or Homebrew's `gtimeout` on the server
+  and, with neither, runs the command without it (the client-side limit still
+  applies). It works under any login shell, csh and tcsh included; Linux
+  servers still use their own `timeout`, with the same exit codes.
+- **The desktop app's terminal starts a login shell.** Opened from the Dock or
+  Finder, the app only has macOS's bare `PATH`, and the terminal read none of the
+  profile files (`~/.zprofile`, `~/.bash_profile`) where Homebrew and most
+  installers add theirs: `brew`, `node` or any tool installed outside `/usr/bin`
+  answered "command not found" there while working in Terminal.app or Warp. The
+  shell is now started with `-l` on macOS and Linux.
+- **The terminal keeps your keystrokes in order.** Each key went to the shell
+  on its own request, several at once, and the control plane wrote them as
+  they arrived: typed fast, or on a busy machine, `mo --help` could reach the
+  shell as `mo- elh-p`, a different command from the one on screen. Keystrokes
+  now leave one request at a time, in order, in every terminal (local and
+  remote, in the app and in `ssh-manager control`).
+
+### Changed
+
+- **The desktop app's terminal on Windows is PowerShell.** It opened `cmd.exe`
+  (what `COMSPEC` names on every Windows machine), the old Command Prompt.
+  It now starts Windows PowerShell (`powershell.exe`, present on Windows 10 and
+  11), the shell Windows Terminal opens by default. `cmd.exe` is still one
+  `cmd` away inside it.
+- **Dependencies.** MCP SDK 1.32.2; dotenv 18, loaded quietly so it adds no line
+  to the log; `@hono/node-server` 2.1.5 (GHSA-rmxm-3fg6-px4f, in a part of the
+  SDK this stdio server never loads); CI actions and development tools.
+
+## [4.0.1] - 2026-10-26
+
+**The application tells you about updates, and nothing changes in the engine.**
+Everything below is in the interface, the packaging and the metadata: the MCP
+engine behaves exactly as in 4.0.0 (the release pipeline upgrades 3.8.5, 3.8.6,
+3.8.7 and 4.0.0 from the registry to this version and back). The desktop app
+updates itself from 4.0.0 and from the 4.0.0 betas.
+
+The Windows installer is **not Authenticode-signed** in this release either,
+for the same reason as 4.0.0 (the public certificate waits on the company's
+registration): Windows shows *"Windows protected your PC"*, *More info → Run
+anyway*, and `ssh-manager app` checks the installer against the SHA-256 in
+`release-manifest-win32.json`. macOS builds are signed and notarized.
+
+### The application shows its updates
+
+- **Options → Updates** (desktop application only): the version running and its
+  channel (a preview build is offered newer previews and the stable release), the
+  version on offer, *Check now*, *Download*, download progress, *Restart to
+  update*, the time of the last check, a link to the release notes, and the reason
+  when a check fails. If commands are waiting for your decision when you restart,
+  it says they will be refused.
+- **The sidebar says so too**: an *Update available* (or *Restart to update*)
+  mark above Options, and a dot on the Options icon when the rail is collapsed.
+  A native notification is posted once per version, not at every launch.
+- *Help → Check for Updates…*, and the menu-bar entry, are kept; the window and
+  the menu show the same state.
+- A browser tab (`ssh-manager control`) and the npm engine see none of it: the
+  endpoints do not exist there, and nothing about updates is drawn.
+
+### Fixes
+
+- **Servers**: the grid/list switch sits beside the search field instead of
+  wrapping onto a line of its own below the group filters, which left a band of
+  empty space when there were many groups.
+- The primary button's hover state no longer drops white-on-orange text below
+  the 4.5:1 AA contrast (it now moves toward the page's text colour).
+
+### Easier to find
+
+- The npm description and keywords, the MCP registry description and the GitHub
+  About box say what V4 is now (SSH for AI agents, with approval, a vault and an
+  audit trail) instead of the v3 pitch; the repository topics lose the ones that
+  had nothing to do with this project.
+- The README opens by saying it is an MCP server for SSH and ends with the
+  questions people ask (is it safe, which clients, do I need Node, how is it
+  different).
+- A code of conduct, issue forms and a pull request template (the project
+  already pointed to a code of conduct that did not exist).
+
+### The interface is built when the package is made, not committed
+
+`dist/ui` (the bundled control plane interface) is no longer in git. `prepack`
+builds it into the npm package and the desktop app builds it when it is
+assembled, so what users install is the same: the package and the app carry the
+built interface and nothing compiles on their machine. In a source checkout, run
+`npm run build:ui` once before `ssh-manager control`. CI builds it on three
+systems and fails if anything generated is tracked; `release.yml` refuses a
+tarball that does not carry it.
+
+## [4.0.0] - 2026-10-25
+
+**V4 is stable, on npm and as a desktop application** — [release](https://github.com/bvisible/mcp-ssh-manager/releases/tag/v4.0.0).
+`npm update -g mcp-ssh-manager` crosses the major version from 3.8.x; to stay on
+the 3.8 line, pin `mcp-ssh-manager@3` (3.8.7 is its latest). Installed beta
+desktop builds update to 4.0.0 by themselves.
+
+The control plane: a local application — a browser tab or a desktop window —
+that shows what your agents are doing on your servers and lets you stop them
+before they do it, with an encrypted vault for credentials, human approval per
+server, a file browser and a shell on your own machine. Everything in it is
+opt-in: **with no vault, no approval set and nothing running, the engine behaves
+as 3.8.x**, which the release pipeline proves by installing 3.8.5, 3.8.6 and
+3.8.7 from the registry and upgrading each to this version. The one deliberate
+behaviour change is that **SSH host keys are verified** (see
+[4.0.0-beta.1](#400-beta1---2026-09-24) and the [migration guide](docs/MIGRATION.md)).
+The previews below list everything in detail.
+
+### The application without npm, and nothing new for those who keep npm
+
+- **Options → AI tools.** Lists Claude Code, Claude Desktop and Codex, shows
+  which ssh-manager each one starts (the npm engine, the desktop application's,
+  another command, or none) with its version, and switches it on a click. The
+  application's engine runs under the application's own runtime
+  (`ELECTRON_RUN_AS_NODE`), so a machine with no Node and no npm gets a working
+  MCP server from the application alone. A switch rewrites that one entry —
+  through `claude mcp` when Claude Code's command is installed, in place in
+  Codex's `config.toml` (comments and other tables kept), and in Claude
+  Desktop's settings only while Claude Desktop is closed, since it rewrites
+  them when it quits. Environment variables of the entry are kept. A file that
+  does not parse is refused, never replaced. No engine is offered from an
+  AppImage or from a disk image, whose path changes on the next start.
+- **No invitation in the CLI.** The one-time "new in v4" note shown by a CLI
+  command is gone, and the menu names the desktop application only when it is
+  installed. Someone who uses the npm engine headless sees exactly what they
+  saw before.
+- The packaged-application smoke test, run on macOS, Windows and Linux before a
+  release, now starts the application's engine as an AI tool would and lists
+  its tools over MCP.
+- Options' tabs wrap inside their bar in a narrow window instead of spilling
+  over the panel below.
+
+### Windows: not code-signed in this release
+
+The Windows installer and application are **not Authenticode-signed** in 4.0.0:
+Windows shows *"Windows protected your PC"* — *More info → Run anyway*. The
+code-signing account exists; its public certificate waits on the company's
+registration, and later releases will be signed. Until then the installer's
+SHA-256 is published in `release-manifest-win32.json` on the release, and
+`ssh-manager app` installs only a file that matches it. macOS builds are signed
+and notarized by Apple; Linux packages are unsigned, as usual.
+
+### Security
+
+- **Remote command execution through `ssh_backup_restore`'s `backupId`**
+  (GHSA-2wjh-xm9c-7qf9, high, reported by @NYBaywatch), present in every
+  preview up to 4.0.0-beta.3 as in 3.8.6: the metadata path went to the server
+  inside `cat "…"`, and `ssh_backup_create`'s `mkdir -p "…"` had the same flaw
+  with `backupDir`. Fixed as in [3.8.7](#387---2026-10-25). The other 3.8.7
+  advisory (GHSA-mq9f-5385-rjf4, a partial name or an alias escaping
+  `readonly`) never affected the previews, which resolve the name before
+  evaluating the policy; its regression test runs here too.
+
+## [4.0.0-beta.3] - 2026-10-25
+
+**A third preview, published on GitHub only** — [release](https://github.com/bvisible/mcp-ssh-manager/releases/tag/v4.0.0-beta.3).
+npm serves [3.8.6](#386---2026-10-08) until the stable 4.0.0. Installed beta
+desktop builds update to this one by themselves.
+
+### Added — from npm to the desktop application in one step
+
+- **`ssh-manager app`** installs the desktop application of the engine's own
+  version and opens it — or only opens it when it is already installed. The
+  file is chosen from the release for this platform and architecture, its size
+  and SHA-256 are checked against the release manifest while it downloads into
+  a private temporary directory, and on macOS the unpacked application must
+  pass `codesign --verify --deep --strict`, be signed by our Developer ID team
+  and be accepted by Gatekeeper. Any failure installs nothing. Windows installs
+  per user, silently; Linux uses the `.deb` (in the terminal, for `sudo`) or the
+  AppImage. `ssh-manager app --status` answers in one line. Exit codes: 0
+  opened, 1 failed, 2 not available here.
+- **The browser interface offers it**: under `ssh-manager control`, a banner
+  says the application exists, installs and opens it in one click with its
+  progress drawn from the event stream, then hands the approval socket over
+  and stops ("Continued in the desktop app — you can close this tab"). Never
+  inside the application; "Not now" is remembered.
+- **The CLI opens on a status screen**: version, server count, configuration
+  file and desktop application state, in the application's orange, two
+  columns when the terminal is wide enough. Every menu number keeps its
+  meaning; letters are added (`a` desktop app, `t` tools, `v` vault, `i` import,
+  `?` help, `q` quit). `--help` is rewritten in sections. `NO_COLOR` is
+  honoured by every command.
+
+### Fixed
+
+- **Stopping a control plane deleted the socket of the one that replaced it.**
+  When a Unix-socket server closes, libuv unlinks whatever file is at its path
+  by then — after a takeover, the desktop application's socket. `stop()` now
+  removes only the files it created itself.
+- **The desktop application could run twice** (a second launch on Windows or
+  Linux started a second copy fighting the first for the approval socket). It
+  now brings the running window forward instead.
+
+### Changed — the interface
+
+- **The application's own colours.** The accent is the orange of the icon's
+  chevron (`#C04500`, brighter in dark mode) instead of the amber carried over
+  from TransHub, on warm neutrals, with Karla as a variable font so bold labels
+  are drawn, not synthesised. Every text colour was checked for WCAG AA on its
+  ground, in both themes.
+- **The rail** shows the product's name and groups its screens — your
+  machines, what agents are doing, the fleet, what you have open. "Waiting"
+  carries a solid orange count. The connection status moved from a strip
+  across every page to the foot of the rail; the strip comes back, as a
+  warning, only when the connection is lost.
+- **Servers** fill the width: cards in a grid instead of one narrow column per
+  group, labelled Files and Shell buttons instead of glyphs that appeared on
+  hover, a coloured chip for each departure from the defaults (read only,
+  restricted, approval), filters by group, and a banner naming the server and
+  command an agent is waiting on.
+- **Waiting**: a destructive request says so across the card, and its button
+  is red and reads "Approve and run". The command can be copied.
+- **Health**: gauges are graphite below their threshold, amber at it, red ten
+  points past it, under a summary of reachable, over-threshold and unreachable
+  servers. The track behind each gauge was invisible (an undefined colour).
+- **Window buttons.** The desktop application no longer has a system title bar
+  on Windows and Linux: minimise, maximise and close are drawn over the right
+  end of the page header in the page's colours (Window Controls Overlay), and
+  the header reserves exactly their width. On macOS the three buttons sit in
+  the rail's top row instead of a strip across the whole window. The header is
+  what you drag the window by.
+- Outlined buttons and inputs had near-black borders (Tailwind 4 draws a bare
+  `border` in the text colour); they use the theme's border colour.
+
+### Added
+
+- **Per-server OpenSSH user certificates: `CERTPATH` / `cert_path`**
+  ([#93](https://github.com/bvisible/mcp-ssh-manager/issues/93)). The
+  certificate is passed to `ssh2` as `publicKey` next to `privateKey`, read on
+  every connection (renewed short-lived certificates need no restart), and a
+  missing file fails the connection. Needs an `ssh2` release with certificate
+  support (mscdex/ssh2#1495); with `ssh2` 1.17.0 the option has no effect.
+- **Windows code signing in the release pipeline**, through Azure Artifact
+  Signing: when the `ARTIFACT_SIGNING_*` secrets are set, electron-builder
+  signs every executable and the installer. Without them the Windows build is
+  unsigned, as before, which a prerelease accepts and a stable release refuses.
+
+### Security
+
+- Dependencies: the advisories published since beta.2 — `zod` 4.6.7 (memory
+  exhaustion on oversized constrained collections), `body-parser` 2.4.0,
+  `hono`, `fast-uri` and `ip-address` in the engine; `electron` 44.9.3 and
+  `undici` in the desktop application; `vite` 6.4.5 for the interface build,
+  whose output is unchanged. `npm audit` is clean in all three packages,
+  development dependencies included.
+
+## [3.8.7] - 2026-10-25
+
+### Security
+
+Two advisories, both reported to us. **Upgrade.**
+
+- **A partial server name or an alias escaped `readonly` and `restricted`
+  mode** (GHSA-mq9f-5385-rjf4, high, reported by @nikhilagrawalsf). The policy
+  looked a server up by its exact name, while the connection resolved aliases,
+  case, a unique part of a name and host matches. So `"p"` instead of `"prod"`,
+  an alias the agent had just created with `ssh_alias`, or the host itself
+  found no policy — unrestricted — and the command then ran on the protected
+  server. The policy now resolves the name exactly as the connection does; an
+  ambiguous name is refused by both. A session keeps the server's own name, not
+  what was typed to open it.
+- **Remote command execution through `ssh_backup_restore`'s `backupId`**
+  (GHSA-2wjh-xm9c-7qf9, high, reported by @NYBaywatch). The metadata path built
+  from it went to the server inside `cat "…"`, where `$(…)` and backticks still
+  run — through a tool that was only meant to restore. `ssh_backup_create`'s
+  `mkdir -p "…"` had the same flaw with `backupDir`, the half of
+  GHSA-qwwm-vrm9-4mw8 the earlier fix missed. Both are quoted now, a backup ID
+  must be a plain file name (no separator, no `..`, no control character), and
+  a test fails if any remote command in `index.js` splices a value inside double
+  quotes again.
+- Dependencies: `zod` 4.6.7, `body-parser` 2.4.0, `fast-uri` 3.1.9,
+  `ip-address` 10.7.5, for the advisories published since 3.8.6.
+  `npm audit` is clean.
+
+## [4.0.0-beta.2] - 2026-10-08
+
+**A second preview, published on GitHub only** — [release](https://github.com/bvisible/mcp-ssh-manager/releases/tag/v4.0.0-beta.2).
+npm serves [3.8.6](#386---2026-10-08), released the same day with the same
+security fixes, until the stable 4.0.0. Installed beta.1 desktop builds update
+to this one by themselves.
+
+### Security
+
+Everything in [3.8.6](#386---2026-10-08) below. Host key verification and the
+quoting of `cwd` were already in beta.1.
+
+### Fixed — found by using V4 in place of our previous tool
+
+- **A refused password was reported as "Too many authentication failures"**
+  ([#88](https://github.com/bvisible/mcp-ssh-manager/issues/88)). With an agent
+  loaded, ssh2 follows a refused password with every agent key, and OpenSSH's
+  `MaxAuthTries` ends it all with its own message. The order is unchanged — an
+  agent key that works still connects — but each attempt is recorded, and the
+  error now says what was refused: *the password was refused; the server then
+  closed the connection while ssh-agent keys were being tried (Too many
+  authentication failures)*. A method the server does not offer is no longer
+  sent. Checked against OpenSSH 9 with six agent keys.
+- **`KEYPATH` expanded the first `~` anywhere in the path**
+  ([#89](https://github.com/bvisible/mcp-ssh-manager/issues/89)). Only a leading
+  `~` or `~/` is expanded now, as a shell does.
+- **A stale `SSH_MANAGER_ENV` loaded zero servers, silently**
+  ([#90](https://github.com/bvisible/mcp-ssh-manager/issues/90)). 3.8.x's engine
+  never read that variable (only the CLI did); beta.1 did, so a profile still
+  pointing it at a deleted file took a working setup from 59 servers to none. A
+  missing file named by `SSH_MANAGER_ENV` is now skipped, as 3.8.x skipped the
+  variable, with a warning. A missing file named by `SSH_ENV_PATH` stays the
+  choice and is reported at startup, in `ssh_list_servers` and in "server not
+  found".
+- Dependencies: `@modelcontextprotocol/sdk` 1.32.1 and the advisories published
+  since beta.1 (`fast-uri`, `ip-address`, `proxy-addr`, `smol-toml`,
+  `brace-expansion`); `npm audit` is clean, development dependencies included.
+
+## [3.8.6] - 2026-10-08
+
+### Security
+
+Six advisories, five reported to us and one found while replacing our previous
+tool with this one. **Upgrade.**
+
+- **Command injection on the machine running mcp-ssh-manager, through the
+  default `on-error` hook** (GHSA-759m-wfpq-xmx3, high). The hook ran
+  `echo "… {error}" >> errors.log` through a shell, with the connection error
+  pasted inside double quotes. That text comes from the server: an SSH server
+  that disconnects with `$(…)` in its reason, before any key exchange, ran a
+  command on your machine. Hook values never become command text any more:
+  each `{placeholder}` becomes a reference to a shell variable holding the value
+  (`SSH_MANAGER_HOOK_SERVER`, …), and the default `on-error` hook is a `log`
+  action written without a shell, to `~/.ssh-manager/errors.log`.
+- **`restricted` mode only checked how a line started** (GHSA-rfxw-26h6-7w42,
+  high, reported by @uozergit). The allow patterns were tested against the
+  whole line, so `^echo ` let `echo hi; id` through, and `^rm ` as a deny pattern
+  missed `echo x; rm -rf /data`. Every command in a list or pipeline must now
+  match, deny patterns apply to each, and command substitution and redirections
+  that write a file are refused. `readonly` also checks the commands inside
+  `$(…)` and backticks.
+- **`cwd` reached the shell unquoted, past the security policy**
+  (GHSA-37fv-fcpc-j236, high, reported by @uozergit). `ssh_execute`,
+  `ssh_execute_group` and `ssh_execute_sudo` built `cd ${cwd} && …`; the
+  directory is now quoted, `~/` still expanding to the remote home.
+- **`ssh_db_query` could write** (GHSA-9w6j-vg8f-hp8g, medium, reported by
+  @zaara2004; GHSA-q37w-vhpx-q5q9, high, reported by @davutselcuk). On MySQL,
+  `SELECT … INTO OUTFILE` wrote a file on the database server; on PostgreSQL,
+  `SELECT … INTO` created a table; on MongoDB, the collection and the query were
+  pasted into JavaScript, so `drop()` or `run()` ran on a tool documented as
+  read-only. SQL is now one `SELECT`, without `INTO` or the server-file
+  functions, run inside a read-only transaction — which also stops a stored
+  function that writes; a MySQL error no longer comes back as an empty result.
+  A MongoDB query must be a filter document (JSON or mongo shell syntax such as
+  `ObjectId("…")`), `$where`, `$function` and `$accumulator` are refused, and the
+  collection is passed as a string. Checked against MariaDB 11, PostgreSQL 16
+  and MongoDB 5.
+- **Host keys were never compared** (GHSA-cwg3-pfmm-w8rm, high, reported by
+  Francesco Canovi (@TheDarkMist), Black Studio Solutions). The key a server presented was
+  accepted for known and unknown hosts alike. It is now compared with
+  `known_hosts` (hashed entries, `[host]:port`, wildcards and `@revoked`
+  included): an unknown host is trusted on first use and recorded, **a changed
+  key is refused** before any credential is sent.
+- **`ssh_deploy` and `ssh_backup_schedule` still spliced values into commands**,
+  the class fixed in 3.8.5 (GHSA-qwwm-vrm9-4mw8) but missed here: the remote path
+  sat in double quotes, where `$(…)` runs; owner, permissions and the temporary
+  file name were bare; the scheduled script pasted the database and the paths.
+  And quoting the crontab line was not enough: cron runs whatever follows the
+  fifth field, so a schedule such as `* * * * * curl … | sh #` installed a job of
+  the caller's choosing. A schedule must now be five cron fields or an `@` macro.
+
+Each fix carries a test that fails without it.
+
+### Behaviour changes
+
+- **A changed host key is refused.** A server reinstalled since its key was
+  recorded stops connecting until the old entry is removed
+  (`ssh-keygen -R <host>`) — this is what an interception looks like, so it is
+  the one change that cannot be opt-in. `SSH_MANAGER_KNOWN_HOSTS` points at a
+  separate file.
+- **A `restricted` allowlist is now checked per command.** A pipe into a
+  command you never allowed, a `;` followed by another command, a `$(…)`, a `>`
+  into a file: each is refused, and the refusal names the command. Add a pattern
+  for each command you do want.
+- **Hook settings, aliases, the active profile, the log and the command
+  history live in `~/.ssh-manager/`** (or `SSH_MANAGER_HOME`), readable by you
+  alone, instead of inside the installed package, where every upgrade lost them
+  and the log was readable by any local user
+  ([#87](https://github.com/bvisible/mcp-ssh-manager/issues/87)). Nothing is
+  written on start; a log needs `~/.ssh-manager` to exist. An old file in the
+  package is still read until your next change writes the new one.
+- **The package no longer ships a `.hooks-config.json`.** The one it carried
+  was a development copy that turned Frappe hooks on for every npm user: each
+  `ssh_deploy` ran `git status` and `npm test` in your working directory, and any
+  command containing `bench update` first ran a full `bench backup` on the
+  server. The hooks now come from your profile, as documented; the `frappe`
+  profile still has them.
+
+## [4.0.0-beta.1] - 2026-09-24
+
+**A preview, published on GitHub only** — [release](https://github.com/bvisible/mcp-ssh-manager/releases/tag/v4.0.0-beta.1). npm keeps serving
+3.8.5 until the stable 4.0.0, so no existing installation receives this.
+
+The control plane: a local application that shows what your agents are doing on
+your servers, and lets you stop them before they do it.
+
+**Upgrading changes nothing on its own** — with one deliberate exception, host
+keys, described first below. With no vault, no approval set and
+nothing running, the engine behaves exactly as 3.8.5 did — verified end to end
+by `scripts/test-upgrade-from-published.mjs`, which installs 3.8.5 from the
+registry, asks it what it sees over MCP, installs this version over the top and
+asks again, then rolls back. Same 37 tool schemas, server fields and unchanged
+`.env` / TOML fixtures; no automatic vault or control plane.
+
+### Behaviour change: host keys are verified
+
+3.8.5 never compared the key a server presented with the one in `known_hosts`;
+it accepted any connection to a known host, and any unknown one. V4 compares it
+on every connection. An unknown host is trusted on first use and its key is
+recorded in `known_hosts`; a **changed** or revoked key is refused before any
+credential is sent. A server rebuilt since its key was recorded is therefore
+refused until the old entry is removed — see
+[the migration guide](docs/MIGRATION.md#the-one-thing-that-behaves-differently-host-keys).
+`SSH_MANAGER_KNOWN_HOSTS` points V4 at a separate file.
+
+### Added
+
+- **Announcing the agent to your servers**, off by default. With
+  `SSH_MANAGER_ANNOUNCE_AGENT=true` (or `ANNOUNCE_AGENT=true` per server),
+  commands, `ssh_tail --follow`, interactive sessions and `ssh_sync` carry
+  `AI_AGENT=mcp-ssh-manager`, following the
+  [AI_AGENT over SSH convention](https://github.com/mthamil107/whotyped/blob/main/docs/spec/ai-agent-over-ssh.md),
+  so a server that keeps it (`AcceptEnv AI_AGENT`) can tell an agent's sessions
+  from a person's. Actions taken from the control plane are a person's and are
+  never announced. Contributed by @mthamil107 (#84).
+- **The control plane** (`ssh-manager control`, or the desktop app): what an
+  agent is running right now with its output through a terminal emulator, a
+  queue of commands waiting on your decision, a dual-pane file browser, health
+  on demand with thresholds, an interactive shell on any server, saved commands,
+  groups, and the audit trail.
+- **Desktop builds** for macOS, Windows and Linux. The app *is* the control
+  plane rather than a window pointed at one, so it needs neither Node nor the
+  npm package.
+  - A **menu-bar item** carrying a count when something is waiting, listing what
+    is blocked on you, which shells and commands are open, and your servers.
+  - **Native notifications** posted by the application itself, so macOS and
+    Windows show and route them correctly. Destructive requests stay on screen.
+- **An encrypted vault** (AES-256-GCM, key in the OS keychain) for credentials,
+  sitting above your config files and below the process environment. Your `.env`
+  is never modified.
+- **Human approval**, per server: the engine pauses, shows you the machine and
+  the command in full, and waits. Every failure denies.
+- `ssh-manager vault` and `ssh-manager control` in the CLI, and the control
+  plane in the interactive menu.
+
+### Changed
+
+- **Approval can no longer be set from a file or the environment.** It is the
+  switch whose accidental override would disable a requested protection.
+  It lives in the vault and is preserved by connection-setting overrides. This
+  is not isolation from a process with control of the local user account. An existing
+  `SSH_SERVER_*_APPROVAL` is reported loudly on start rather than silently
+  ignored. Never released before this version, so no published behaviour changes.
+- Keychain lookups now time out after five seconds instead of blocking forever
+  on a host with no user session — a server over SSH, a container, a CI runner.
+
+### Fixed
+
+- Vault changes reload without restarting; editing a server keeps omitted
+  credentials, accounts, proxies, restrictions and approval. Process environment
+  overrides cannot erase an existing approval policy.
+- Recovery decrypts every credential before writing, previews replacements, and
+  refuses stale previews. Backup and restore are also available in Options → Vault.
+- SSH host keys are verified during the handshake. Remote MCP tools share one
+  approval/policy boundary; aliases resolve consistently, approvals are requested
+  once, and config changes invalidate old pooled connections. Working directories
+  with spaces or shell metacharacters are quoted.
+- Desktop groups persist in user state rather than inside the signed application.
+  Release metadata is regenerated after notarization/stapling; publishing waits
+  for platform checks. Release candidates use npm `next` without changing stable
+  Homebrew or MCP Registry entries.
+- First-run welcome now has local SVG illustrations, reduced-motion support and
+  keyboard-accessible dialogs. Add/import actions open their forms directly.
+  Server protection and lost control-plane connections are visible. Sidebar,
+  theme, server layout and collapsed groups survive a new local port.
+- `mkdirSync` under an unwritable path could hang indefinitely on Linux, which
+  cost this project's CI a six-hour job before anyone looked.
+- **Quitting the desktop application could hang indefinitely** while an MCP
+  engine was connected to it — which is the normal situation while an agent is
+  using it. Shutdown waited on connections that never end by themselves; it now
+  ends them, and an engine waiting on a decision is still answered `deny` first.
+  Found by the release smoke test, which hung on quit in two launches out of
+  four and now reports the time each stage takes.
+- **Editing a server from the CLI menu always failed** with `Server '' not
+  found`: the menu stored its choice in `selected_server` and the edit wizard
+  read `SELECTED_SERVER`. Also in 3.8.5. Fixed by @TheRealKamisama (#83).
+
+### Security
+
+- hono 4.13.9 (through the MCP SDK), clearing GHSA-gqvv-2mrq-wpjv,
+  GHSA-g6gw-c38x-mqfc and GHSA-crvj-82cr-hjcx. The stdio server never loads it;
+  the desktop build ships it. `npm audit --omit=dev` is clean for the engine,
+  the desktop application and the interface.
+
+### Distribution
+
+- **macOS** (Apple silicon, Intel): signed with a Developer ID and notarized.
+- **Windows** (x64, arm64): **not code-signed in this preview**; Windows warns
+  before running it. Signing is required before the stable release.
+- **Linux** (x64): `.deb` and `.AppImage`, unsigned as Linux packages usually are.
+- An installed preview updates itself: to the next preview, and to 4.0.0 when it
+  ships. Previews are named `beta` for that reason — electron-updater only moves
+  `alpha` and `beta` builds on to a stable release, and an `rc` would have left
+  its testers on it indefinitely.
+
 ## [3.8.5] - 2026-08-28
 
 ### Security

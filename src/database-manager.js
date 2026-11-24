@@ -13,7 +13,8 @@ export const DB_TYPES = {
 // A single quote character as a constant, so shellQuote()'s escaping stays
 // readable under the repo's single-quote lint style.
 import { shellQuote } from './shell-quote.js';
-export { shellQuote };
+import { guardedDump, guardedFeed, mongoArchivePath } from './dump-guard.js';
+export { shellQuote, mongoArchivePath };
 
 /**
  * Build MySQL dump command
@@ -44,13 +45,8 @@ export function buildMySQLDumpCommand(options) {
     command += ` ${tables.map(shellQuote).join(' ')}`;
   }
 
-  if (compress) {
-    command += ` | gzip > ${shellQuote(outputFile)}`;
-  } else {
-    command += ` > ${shellQuote(outputFile)}`;
-  }
-
-  return command;
+  // A producer that fails must fail the whole command and leave no file: see dump-guard.js.
+  return guardedDump(command, outputFile, compress);
 }
 
 /**
@@ -87,13 +83,8 @@ export function buildPostgreSQLDumpCommand(options) {
 
   command += ` ${shellQuote(database)}`;
 
-  if (compress) {
-    command += ` | gzip > ${shellQuote(outputFile)}`;
-  } else {
-    command += ` > ${shellQuote(outputFile)}`;
-  }
-
-  return command;
+  // A producer that fails must fail the whole command and leave no file: see dump-guard.js.
+  return guardedDump(command, outputFile, compress);
 }
 
 /**
@@ -127,7 +118,7 @@ export function buildMongoDBDumpCommand(options) {
   command += ` --out ${shellQuote(outputDir)}`;
 
   if (compress) {
-    command += ` && tar -czf ${shellQuote(outputDir + '.tar.gz')} -C "$(dirname ${shellQuote(outputDir)})" "$(basename ${shellQuote(outputDir)})"`;
+    command += ` && tar -czf ${shellQuote(mongoArchivePath(outputDir))} -C "$(dirname ${shellQuote(outputDir)})" "$(basename ${shellQuote(outputDir)})"`;
     command += ` && rm -rf ${shellQuote(outputDir)}`;
   }
 
@@ -147,22 +138,16 @@ export function buildMySQLImportCommand(options) {
     inputFile
   } = options;
 
-  let command = '';
-
-  if (inputFile.endsWith('.gz')) {
-    command = `gunzip -c ${shellQuote(inputFile)} | `;
-  } else {
-    command = `cat ${shellQuote(inputFile)} | `;
-  }
-
-  command += 'mysql';
+  let command = 'mysql';
   if (user) command += ` -u${shellQuote(user)}`;
   if (password) command += ` -p${shellQuote(password)}`;
   if (host) command += ` -h ${shellQuote(host)}`;
   if (port) command += ` -P ${shellQuote(port)}`;
   command += ` ${shellQuote(database)}`;
 
-  return command;
+  // A gzip file is verified whole before mysql reads a byte of it (dump-guard.js).
+  if (inputFile.endsWith('.gz')) return guardedFeed(inputFile, command);
+  return `cat ${shellQuote(inputFile)} | ${command}`;
 }
 
 /**
@@ -190,11 +175,8 @@ export function buildPostgreSQLImportCommand(options) {
   command += ' --clean --if-exists';
   command += ` -d ${shellQuote(database)}`;
 
-  if (inputFile.endsWith('.gz')) {
-    command = `gunzip -c ${shellQuote(inputFile)} | ${command}`;
-  } else {
-    command += ` ${shellQuote(inputFile)}`;
-  }
+  if (inputFile.endsWith('.gz')) return guardedFeed(inputFile, command);
+  command += ` ${shellQuote(inputFile)}`;
 
   return command;
 }
@@ -393,6 +375,8 @@ export function buildMySQLQueryCommand(options) {
   if (!isSafeQuery(query)) {
     throw new Error('Only SELECT queries are allowed');
   }
+  assertNoMySQLClientCommands(query);
+  const script = readOnlyScript(query);
 
   let command = 'mysql';
   if (user) command += ` -u${shellQuote(user)}`;
@@ -408,9 +392,9 @@ export function buildMySQLQueryCommand(options) {
     // Use JSON output if MySQL 5.7.8+. The awk pipe stays on the heredoc opening line so
     // the terminator remains alone on its own line.
     const awk = 'awk \'BEGIN{print "["} {if(NR>1)print ","; printf "{\\"row\\":%d,\\"data\\":\\"%s\\"}", NR, $0} END{print "]"}\'';
-    command += ` --batch --skip-column-names${buildHeredoc(query, { pipeline: `| ${awk}` })}`;
+    command += ` --batch --skip-column-names${buildHeredoc(script, { pipeline: `| ${awk}` })}`;
   } else {
-    command += buildHeredoc(query);
+    command += buildHeredoc(script);
   }
 
   return command;
@@ -431,14 +415,24 @@ export function buildPostgreSQLQueryCommand(options) {
     command = `PGPASSWORD=${shellQuote(password)} `;
   }
 
-  command += 'psql';
+  // -q keeps the BEGIN/ROLLBACK of the read-only wrapper out of the output, and
+  // ON_ERROR_STOP keeps the query from running if the wrapper itself fails.
+  command += 'psql -q -v ON_ERROR_STOP=1';
   if (user) command += ` -U ${shellQuote(user)}`;
   if (host) command += ` -h ${shellQuote(host)}`;
   if (port) command += ` -p ${shellQuote(port)}`;
   command += ` -d ${shellQuote(database)}`;
-  // Feed SQL via stdin (quoted heredoc) instead of `-c "${query}"` so the remote shell
-  // never parses it. See buildHeredoc and issue #44.
-  command += buildHeredoc(query);
+  // Each statement is a single-quoted `-c` argument, never psql's input. psql runs
+  // the backslash commands of a script it reads (`\!` runs a shell command, `\o |cmd`
+  // pipes to one) wherever they appear, so a query fed on stdin could leave the
+  // database for the shell (GHSA-qmf5-hrhv-5hjm). A `-c` that does not start with a
+  // backslash goes to the server as it is. Three of them, not one: psql before 15
+  // prints only the last result of a multi-statement `-c`, here the ROLLBACK.
+  // shellQuote, not double quotes, so the remote shell parses nothing (issue #44).
+  const statement = query.trim().replace(/;\s*$/, '');
+  command += ` -c ${shellQuote('BEGIN TRANSACTION READ ONLY')}`;
+  command += ` -c ${shellQuote(statement)}`;
+  command += ` -c ${shellQuote('ROLLBACK')}`;
 
   return command;
 }
@@ -456,38 +450,235 @@ export function buildMongoDBQueryCommand(options) {
   if (password) command += ` --password ${shellQuote(password)}`;
   command += ` ${shellQuote(database)}`;
   // Feed the JS script via stdin (quoted heredoc) instead of `--eval "..."` so the
-  // remote shell never expands backticks/`$` in the query. mongo still evaluates the
-  // script as JavaScript (expected). See buildHeredoc and issue #44.
-  const script = `db.${collection}.find(${query || '{}'}).forEach(printjson)`;
+  // remote shell never expands backticks/`$` in the query. See buildHeredoc and issue #44.
+  //
+  // The heredoc only keeps the shell out: mongo evaluates the script as
+  // JavaScript. Up to 3.8.5 the collection and the query were spliced into it
+  // raw, so `{}).forEach(printjson); db.dropDatabase(); db.x.find({` ran on a
+  // tool documented as read-only (GHSA-q37w-vhpx-q5q9). The collection now
+  // travels as a string literal, and the query must parse as a plain filter
+  // document: literals and a few type constructors, never code.
+  const filter = query && query.trim() ? checkMongoFilter(query) : '{}';
+  const script = `db.getCollection(${jsString(collection)}).find(${filter}).forEach(printjson)`;
   command += ` --quiet${buildHeredoc(script)}`;
 
   return command;
 }
 
 /**
- * Validate query is safe (SELECT only)
+ * A JavaScript string literal for any text. JSON.stringify leaves U+2028 and
+ * U+2029 raw, which older JavaScript engines read as line breaks.
+ * @param {any} value
+ */
+function jsString(value) {
+  if (typeof value !== 'string' || !value || value.includes('\0')) {
+    throw new Error('A MongoDB collection name must be a non-empty string');
+  }
+  return JSON.stringify(value).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
+// Constructors a filter document may call, as the mongo shell spells them.
+const MONGO_CONSTRUCTORS = new Set([
+  'ObjectId', 'ISODate', 'Date', 'NumberLong', 'NumberInt', 'NumberDecimal',
+  'Timestamp', 'UUID', 'BinData', 'MinKey', 'MaxKey', 'RegExp',
+]);
+// Operators that run JavaScript on the database server.
+const MONGO_CODE_OPERATORS = new Set(['$where', '$function', '$accumulator']);
+
+/**
+ * Check that a MongoDB query is a filter document and nothing else, and
+ * return it unchanged. Accepted: JSON, or the mongo shell's relaxed form
+ * (unquoted keys, single-quoted strings, regex literals, ObjectId("…") and
+ * the other constructors above). Refused: anything that is code — function
+ * calls outside that list, property access, operators, statements — and the
+ * operators that evaluate JavaScript on the server ($where, $function,
+ * $accumulator), which a read-only tool has no use for.
+ * @param {string} query
+ * @returns {string}
+ */
+export function checkMongoFilter(query) {
+  const text = String(query);
+  let i = 0;
+  const fail = (what) => {
+    throw new Error(`MongoDB query must be a filter document such as {"status": "active"}: ${what} at offset ${i}`);
+  };
+  const skip = () => { while (i < text.length && /\s/.test(text[i])) i++; };
+  const identifier = () => {
+    const m = /^[$A-Za-z_][\w$]*/.exec(text.slice(i));
+    if (!m) return null;
+    i += m[0].length;
+    return m[0];
+  };
+  const string = () => {
+    const quote = text[i];
+    let value = '';
+    i++;
+    while (i < text.length && text[i] !== quote) {
+      if (text[i] === '\n' || text[i] === '\r') fail('a line break inside a string');
+      if (text[i] === '\\') { value += text[i + 1]; i += 2; continue; }
+      value += text[i++];
+    }
+    if (i >= text.length) fail('an unterminated string');
+    i++;
+    return value;
+  };
+  const number = () => {
+    const m = /^-?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?/.exec(text.slice(i));
+    if (!m) return false;
+    i += m[0].length;
+    return true;
+  };
+  const value = () => {
+    skip();
+    const ch = text[i];
+    if (ch === '{') return object();
+    if (ch === '[') return array();
+    if (ch === '"' || ch === '\'') { string(); return; }
+    if (ch === '/') {
+      const m = /^\/(?:\\.|[^/\\\n])+\/[gimsuy]*/.exec(text.slice(i));
+      if (!m) fail('an invalid regular expression');
+      i += m[0].length;
+      return;
+    }
+    if (number()) return;
+    const start = i;
+    let name = identifier();
+    if (name === 'new') { skip(); name = identifier(); }
+    if (name === 'true' || name === 'false' || name === 'null' || name === 'undefined') return;
+    if (name && MONGO_CONSTRUCTORS.has(name)) {
+      skip();
+      if (text[i] !== '(') fail(`${name} without arguments`);
+      i++;
+      skip();
+      while (text[i] !== ')') {
+        skip();
+        if (text[i] === '"' || text[i] === '\'') string();
+        else if (!number()) fail(`an argument to ${name} that is not a string or a number`);
+        skip();
+        if (text[i] === ',') { i++; continue; }
+        if (text[i] !== ')') fail(`an unterminated ${name}(`);
+      }
+      i++;
+      return;
+    }
+    i = start;
+    fail(name ? `"${name}", which is not a value` : 'something that is not a value');
+  };
+  const key = () => {
+    skip();
+    const ch = text[i];
+    const name = ch === '"' || ch === '\'' ? string() : identifier() ?? (number() ? '' : fail('a key that is not a name'));
+    if (MONGO_CODE_OPERATORS.has(name)) fail(`${name}, which runs JavaScript on the server`);
+  };
+  const object = () => {
+    i++;
+    skip();
+    while (text[i] !== '}') {
+      key();
+      skip();
+      if (text[i] !== ':') fail('a missing ":"');
+      i++;
+      value();
+      skip();
+      if (text[i] === ',') { i++; skip(); continue; }
+      if (text[i] !== '}') fail('a missing "," or "}"');
+    }
+    i++;
+  };
+  const array = () => {
+    i++;
+    skip();
+    while (text[i] !== ']') {
+      value();
+      skip();
+      if (text[i] === ',') { i++; skip(); continue; }
+      if (text[i] !== ']') fail('a missing "," or "]"');
+    }
+    i++;
+  };
+
+  skip();
+  if (text[i] !== '{') fail('no opening "{"');
+  object();
+  skip();
+  if (i < text.length) fail('text after the filter');
+  return text.trim();
+}
+
+// Words a read-only SELECT has no business containing. The statement verbs
+// were always refused; INTO and the file functions were not, and a SELECT can
+// write: `SELECT … INTO OUTFILE` writes a file on the database server
+// (GHSA-9w6j-vg8f-hp8g), `SELECT … INTO new_table` creates a table in
+// PostgreSQL, and the server-file functions read or write outside the
+// database. Matched as whole words, case-insensitively.
+const FORBIDDEN_SQL_WORDS = [
+  'insert', 'update', 'delete', 'drop', 'create', 'alter',
+  'truncate', 'grant', 'revoke', 'exec', 'execute',
+  'into', 'outfile', 'dumpfile', 'load_file', 'sys_exec', 'sys_eval',
+  'pg_read_file', 'pg_read_binary_file', 'pg_ls_dir', 'pg_stat_file',
+  'pg_file_write', 'pg_file_rename', 'pg_file_unlink',
+  'lo_import', 'lo_export', 'lo_from_bytea', 'lo_put', 'lo_create', 'lo_unlink',
+  'dblink', 'dblink_exec', 'pg_terminate_backend', 'pg_cancel_backend',
+  'pg_reload_conf', 'pg_rotate_logfile', 'pg_promote', 'set_config',
+];
+const FORBIDDEN_SQL = new RegExp(`\\b(${FORBIDDEN_SQL_WORDS.join('|')})\\b`, 'i');
+
+/**
+ * Validate query is safe (SELECT only): one statement, beginning with SELECT,
+ * containing none of the words above. The builders also run it inside a
+ * read-only transaction, which catches what a word list cannot see, such as a
+ * stored function that writes.
  */
 export function isSafeQuery(query) {
-  const trimmedQuery = query.trim().toLowerCase();
+  if (typeof query !== 'string') return false;
+  const statement = query.trim().replace(/;\s*$/, '');
 
   // Must start with SELECT
-  if (!trimmedQuery.startsWith('select')) {
+  if (!/^select\b/i.test(statement)) {
     return false;
   }
 
-  // Block dangerous keywords
-  const dangerousKeywords = [
-    'insert', 'update', 'delete', 'drop', 'create', 'alter',
-    'truncate', 'grant', 'revoke', 'exec', 'execute'
-  ];
-
-  for (const keyword of dangerousKeywords) {
-    if (trimmedQuery.includes(keyword)) {
-      return false;
-    }
+  // One statement only: a second one would run after the check, unchecked.
+  if (statement.includes(';')) {
+    return false;
   }
 
-  return true;
+  return !FORBIDDEN_SQL.test(statement);
+}
+
+/**
+ * Refuse what the mysql client would take for one of its own commands.
+ *
+ * The query reaches the remote `mysql` client as its input, and the client acts
+ * on backslash commands anywhere in a line (`\!` runs a shell command) and on
+ * named ones at the start of a line (`system`, `source`, `tee`), in batch mode and
+ * with `-e` alike, before the database sees anything (GHSA-qmf5-hrhv-5hjm). There
+ * is no option every client accepts to turn this off (MariaDB has `--sandbox`,
+ * MySQL 8.0.40+ `--system-command=OFF`, older clients reject both), so the query
+ * may contain neither a backslash nor a line break, nor any other control
+ * character. A read-only SELECT needs none of them.
+ *
+ * @param {string} query - A query that passed isSafeQuery
+ * @throws {Error} When the query contains a backslash or a control character
+ */
+export function assertNoMySQLClientCommands(query) {
+  const statement = query.trim();
+  // eslint-disable-next-line no-control-regex
+  if (/[\\\x00-\x08\x0a-\x1f\x7f]/.test(statement)) {
+    throw new Error('MySQL queries must be one line without backslashes: the mysql client runs commands such as \\! (shell) found in its input');
+  }
+}
+
+/**
+ * The SQL fed to the mysql client: the query inside a read-only transaction.
+ * The database then refuses any write the query would make, including one
+ * hidden in a function it calls (MySQL 5.6.5+, MariaDB 10.0+). PostgreSQL gets
+ * the same transaction from separate `-c` arguments (buildPostgreSQLQueryCommand).
+ * @param {string} query - A query that passed isSafeQuery
+ */
+function readOnlyScript(query) {
+  const statement = query.trim().replace(/;\s*$/, '');
+  return `SET SESSION TRANSACTION READ ONLY;\n${statement};`;
 }
 
 /**

@@ -1,6 +1,6 @@
-import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { readUserState, writeUserState } from './user-state.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,16 +10,19 @@ const __dirname = path.dirname(__filename);
  * Allows using aliases like "prod" instead of full server names
  */
 
-const ALIASES_FILE = path.join(__dirname, '..', '.server-aliases.json');
+// Kept in the manager home; the package copy is read only as a fallback for a
+// source checkout (see user-state.js, issue #87).
+const ALIASES_NAME = 'server-aliases.json';
+const LEGACY_ALIASES_FILE = path.join(__dirname, '..', '.server-aliases.json');
 
 /**
  * Load server aliases from configuration file
  */
 function loadAliases() {
   try {
-    if (fs.existsSync(ALIASES_FILE)) {
-      const content = fs.readFileSync(ALIASES_FILE, 'utf8');
-      return JSON.parse(content);
+    const state = readUserState(ALIASES_NAME, LEGACY_ALIASES_FILE);
+    if (state) {
+      return JSON.parse(state.text);
     }
   } catch (error) {
     console.error(`Warning: Could not load aliases: ${error.message}`);
@@ -32,7 +35,7 @@ function loadAliases() {
  */
 function saveAliases(aliases) {
   try {
-    fs.writeFileSync(ALIASES_FILE, JSON.stringify(aliases, null, 2));
+    writeUserState(ALIASES_NAME, JSON.stringify(aliases, null, 2));
     return true;
   } catch (error) {
     console.error(`Error saving aliases: ${error.message}`);
@@ -46,15 +49,16 @@ function saveAliases(aliases) {
 export function resolveServerName(nameOrAlias, servers) {
   const aliases = loadAliases();
 
-  // Check if it's an alias
-  if (aliases[nameOrAlias]) {
-    return aliases[nameOrAlias];
+  // A canonical name always identifies itself, even if an old alias has the
+  // same spelling. Policy checks and connection lookup must agree on identity.
+  const normalizedName = nameOrAlias.toLowerCase();
+  if (Object.hasOwn(servers, normalizedName)) {
+    return normalizedName;
   }
 
-  // Check if it's a direct server name
-  const normalizedName = nameOrAlias.toLowerCase();
-  if (servers[normalizedName]) {
-    return normalizedName;
+  if (Object.hasOwn(aliases, nameOrAlias)) {
+    const target = String(aliases[nameOrAlias]).toLowerCase();
+    return Object.hasOwn(servers, target) ? target : null;
   }
 
   // Try to find partial match

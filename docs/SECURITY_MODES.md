@@ -24,7 +24,38 @@ attacks, layered between the MCP client and the SSH session.
 |---|---|
 | `unrestricted` (default) | No filter. Identical to pre-v3.5.0 behavior. Zero overhead — `evaluatePolicy()` early-returns. |
 | `readonly` | Blocks mutating tools at the tool level (`ssh_upload`, `ssh_deploy`, `ssh_sync`, `ssh_execute_sudo`, `ssh_backup_create/restore/schedule`, `ssh_db_import/dump`, `ssh_key_manage` write actions, `ssh_alert_setup` set, `ssh_process_manager kill`). For `ssh_execute` / `ssh_execute_sudo` / `ssh_execute_group` / `ssh_session_send`, applies a built-in denylist (rm, mv, dd, mkfs, chmod, chown, sudo, systemctl restart/stop, docker rm/stop, pipe-to-sh, redirect outside `/tmp`, etc.). |
-| `restricted` | All readonly blocks plus: every command must match at least one `ALLOW_PATTERNS` regex AND no `DENY_PATTERNS` regex. **DENY wins over ALLOW**. With no `ALLOW_PATTERNS`, every command is refused (fail-closed). |
+| `restricted` | All readonly blocks plus: **every command on the line** must match at least one `ALLOW_PATTERNS` regex, and neither the line nor any command in it may match a `DENY_PATTERNS` regex. **DENY wins over ALLOW**. Command substitution and redirections that write a file are refused. With no `ALLOW_PATTERNS`, every command is refused (fail-closed). |
+
+### How a command line is checked in `restricted` mode
+
+The line is split into the commands it would run — at `;`, `&&`, `||`, `|`, `&`
+and line breaks, outside quotes — and **each one** must match an allow pattern.
+`^docker ps` therefore allows `docker ps -a`, but not `docker ps; id`, and
+`docker ps | grep web` only if `grep` is allowed too. Up to 3.8.5 the patterns
+were tested against the whole line, so an allowed start carried anything
+appended to it ([GHSA-rfxw-26h6-7w42](https://github.com/bvisible/mcp-ssh-manager/security/advisories/GHSA-rfxw-26h6-7w42)).
+
+Also refused, because they run or change things the patterns never see:
+
+- command substitution: `$(…)`, backticks, `<(…)`, `>(…)`, even inside double quotes;
+- redirections that write a file: `>`, `>>`, `>|`, `&>`, `<>` — except to
+  `/dev/null`, `/dev/stdout`, `/dev/stderr` and descriptor copies such as `2>&1`;
+- a line that cannot be read with confidence (an unterminated quote, for example):
+  the constructs that shells read in their own way, so that a command could be
+  hidden from the allowlist in one of them. These are here-documents (`<<`;
+  `<<<` is fine), ANSI-C quotes (`$'…'`), a `${…}` that is more than a plain name
+  (`${HOME}` and `${#HOME}` are fine, `${x:-word}` and `${ command; }` are not),
+  and parentheses that are not quoted or escaped (a subshell to `sh`, a command
+  to zsh and fish; `\(` and `'('` are fine).
+
+A comment is a `#` that starts a word, up to the end of its line. It is not part of
+the command it follows, so `ls -l # list; all` is one command, `ls -l`, and an
+apostrophe or a backslash in a comment changes nothing. Up to 4.3.2 comments were
+not recognised, and a quote or a trailing backslash in one made the reader see
+fewer commands than the shell ran
+([GHSA-86xm-rv3h-r4f2](https://github.com/bvisible/mcp-ssh-manager/security/advisories/GHSA-86xm-rv3h-r4f2)).
+`readonly` mode also checks the commands inside `$(…)` and backticks against its
+built-in list.
 
 ## Configuration
 
@@ -64,25 +95,65 @@ audit_log = "/var/log/mcp-ssh-prod.jsonl"
 TOML arrays are preferred. A `;`-separated string is also accepted for
 parity with the `.env` form.
 
+### Where the file tools may write on this machine: the transfer root
+
+`ssh_download` writes a file on the machine that runs the engine, and `ssh_upload`
+and `ssh_sync` read from it. `readonly` and `restricted` are about what runs on the
+*server*, and an agent that cannot run a command there could still put a file of its
+choosing on the server (a redirect to `/tmp` is allowed in `readonly`) and have it
+downloaded over `~/.zshrc` or into `~/.ssh/authorized_keys` here. Up to 4.3.3 nothing
+looked at the local path. A **transfer root** is the one folder the local side of a
+transfer may use:
+
+```bash
+SSH_SERVER_PROD_TRANSFER_ROOT=~/transfers/prod        # TOML: transfer_root = "~/transfers/prod"
+```
+
+- A server with a `TRANSFER_ROOT` is held to it in every mode, by all three tools.
+- A server in `readonly` or `restricted` mode with none is held to
+  `~/.ssh-manager/transfers` for `ssh_download` (`ssh_upload` and `ssh_sync` are refused
+  there already). The folder is made, private to you, the first time a download needs it.
+- A server in `unrestricted` mode with none is not filtered, as before.
+
+A relative local path is read from the root, so `ssh_download` with the local path
+`logs/app.log` writes `~/.ssh-manager/transfers/logs/app.log`. A path is accepted when
+its real location, after following every link, is inside the root; `..`, a sibling
+folder that starts like the root, and a folder link that leads out are refused, and so
+is a link as the file itself. A download is received beside its place and moved there,
+so a transfer that fails leaves no half file, and a link put there meanwhile is replaced,
+not followed. The check runs just before the transfer: it does not stop someone who can
+already change files inside the root while it runs, and for `ssh_sync` it covers the
+folder named, not what rsync does inside it.
+
+If you download to a folder of your own from a `readonly` or `restricted` server, set
+`TRANSFER_ROOT` to that folder.
+
 ## Audit log
 
 When `AUDIT_LOG` (`.env`) or `audit_log` (TOML) is set to a file path, every
-**gated** tool invocation appends a JSONL record:
+tool that targets the server appends a JSONL record of what happened: the
+outcome of each one that ran, and the reason for each one that was refused.
 
 ```json
 {"ts":"2026-05-18T15:30:00.123Z","server":"prod","tool":"ssh_execute","args":{"command":"ls /tmp"},"allowed":true,"exitCode":0,"success":true}
 {"ts":"2026-05-18T15:30:14.789Z","server":"prod","tool":"ssh_execute","args":{"command":"rm /tmp/x"},"allowed":false,"reason":"Command refused on server \"prod\" (mode: readonly): matches built-in destructive pattern /(^|[\\s;&|])rm(\\s|$)/."}
+{"ts":"2026-05-18T15:31:02.004Z","server":"prod","tool":"ssh_tail","args":{"file":"/var/log/app.log","lines":5,"follow":false},"allowed":true,"success":true}
 ```
 
-Secrets (`password`, `passphrase`, `sudoPassword`, `token`, `secret`, `apikey`)
-are redacted to `***` before being written, even if a tool somehow passed them
-through args.
+- A tool that knows its exit code (`ssh_execute`, `ssh_execute_sudo`, `ssh_upload`,
+  `ssh_download`, group and session commands) records `exitCode` and `success`;
+  every other tool records `success`, with `error` when it failed.
+- Tools that only read or edit local state (`ssh_list_servers`, aliases, tunnel
+  lists, `ssh_history`…) leave no line: nothing reached a server.
+- A value whose key looks like a secret (`password`, `dbPassword`, `passphrase`,
+  `sudoPassword`, `token`, `secret`, `apiKey`, `credential`, `privateKey`…) is
+  replaced by `***` before it is written, and in the approval request too.
+- Before 4.2.0 only `ssh_execute` and `ssh_upload` (and, from 4.1.0, sudo,
+  downloads, group and session commands) recorded their outcome; a refusal was
+  recorded for every tool.
 
 Log rotation is not handled by `mcp-ssh-manager` — use `logrotate`, `vector`,
-or your log shipper of choice. v3.5.0 audits cover the gated tool set:
-`ssh_execute`, `ssh_upload`, `ssh_execute_sudo`, plus denials on every other
-mutating tool. Pure read tools (`ssh_health_check`, `ssh_db_query`, `ssh_tail`…)
-are not audited in v3.5.0 — open an issue if you need full coverage.
+or your log shipper of choice.
 
 ## Recipes
 
@@ -148,10 +219,12 @@ SSH_SERVER_CLIENT_PROD_AUDIT_LOG=~/.ssh-manager/audit/client-prod.jsonl
 `ssh_key_manage` (only `accept` / `remove`), `ssh_alert_setup` (only `set`),
 `ssh_process_manager` (only `kill`).
 
-**Not gated** (pure reads or local-only state — no remote effect to block):
+**Not gated** (pure reads or local-only state — no remote effect to block; the
+local side of `ssh_download` is held to the transfer root, see above):
 `ssh_list_servers`, `ssh_download`, `ssh_tail`, `ssh_monitor`, `ssh_history`,
 `ssh_health_check`, `ssh_service_status`, `ssh_db_list`, `ssh_db_query`
-(already SELECT-only), `ssh_backup_list`, `ssh_session_start`,
+(one SELECT run in a read-only transaction; for MongoDB a filter document,
+never code), `ssh_backup_list`, `ssh_session_start`,
 `ssh_session_list`, `ssh_session_close`, `ssh_connection_status`,
 `ssh_tunnel_*`, `ssh_group_manage`, `ssh_command_alias`, `ssh_alias`,
 `ssh_hooks`, `ssh_profile`.
@@ -164,7 +237,9 @@ SSH_SERVER_CLIENT_PROD_AUDIT_LOG=~/.ssh-manager/audit/client-prod.jsonl
 - **Regex-based filtering can be bypassed** with creative command crafting
   (encoded payloads, indirection via shell variables, etc.). Treat `readonly`
   as protection against accidents and prompt injection of the common form,
-  not as an unbreakable shell escape.
+  not as an unbreakable shell escape. `restricted` is the stronger of the two:
+  every command must be one you allowed, so keep its patterns narrow — an
+  allowed interpreter (`^python`, `^bash`, `^sh`) allows everything.
 - **Aliases are expanded before policy evaluation** — you can't bypass a DENY
   by hiding `rm` behind an alias defined via `ssh_command_alias`.
 - **No transport-level / per-client policies.** All clients see the same
@@ -187,3 +262,10 @@ A v3.4.x `.env` or TOML loads identically under v3.5.0:
   so the client never sees a new prompt.
 
 See `CHANGELOG.md` v3.5.0 for the full diff.
+
+**One deliberate exception, in 3.8.6 and 4.0:** a `restricted` server now checks
+every command on a line, so an existing allowlist refuses lines it used to let
+through — a pipe into a command you never allowed, a `;` followed by another
+command, a `$(…)`, a `>` into a file. That was the hole. Add a pattern for each
+command you do want (`^grep `, `^head `), and the refusal names the command that
+did not match. Servers without `MODE`, and `readonly` ones, are unaffected.

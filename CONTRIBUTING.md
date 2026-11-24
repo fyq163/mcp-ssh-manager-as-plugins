@@ -70,6 +70,10 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 4. Make your changes and test them
 
+   The interface (`ui/`) is built, not committed: `npm run build:ui` builds it
+   into the git-ignored `dist/ui`, which `ssh-manager control` serves from a
+   checkout. Changing `ui/` needs no build artifact in your pull request.
+
 5. Commit your changes:
    ```bash
    git add .
@@ -115,6 +119,32 @@ Before submitting a pull request:
 
 CI installs with `npm ci` on Node 18, 20 and 22, and the `lint` job runs
 ESLint and the JSDoc typecheck as blocking gates.
+
+### Tests come with the change
+
+New functionality and every bug fix arrive with automated tests, in the same
+pull request: a test that fails without the change and passes with it. This is
+the project's policy for any major new functionality, and reviewers ask for the
+test before the code. Where the test is:
+
+- `tests/test-*.js` for the engine (run by `npm test`; each file is also a
+  script of its own, `npm run test:<name>`),
+- `ui/tests/*.spec.ts` for the interface (Playwright, `npm --prefix ui run
+  test:e2e`),
+- `tests/test-shell-quote-properties.js` shows the property-based style
+  (`fast-check`) used where a bug class matters more than one example: anything
+  that builds a command for a remote shell must go through `shellQuote()` and be
+  covered by it.
+
+Security fixes also add the exact input that broke the code as a regression
+test (see `tests/test-backup-monitor-injection.js` for the pattern).
+
+### Static analysis and warnings
+
+ESLint, the JSDoc typecheck (`npm run typecheck`, zero errors) and CodeQL run on
+every push and pull request, and OpenSSF Scorecard runs on `main`. Findings are
+fixed rather than ignored; an alert that is a false positive is dismissed on
+GitHub with a written reason.
 
 ## Documentation
 

@@ -1,0 +1,695 @@
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+
+/* ==============================
+   Design system, carried over from TransHub AI (same authors, MIT here)
+   shadcn/ui compatible + Fluent-inspired
+   ============================== */
+
+@font-face {
+  font-family: 'Forum';
+  src: url('./assets/fonts/Forum-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+}
+
+/* Variable, 200 to 800. The static regular cut it replaces left every bold
+   label to the browser's synthetic bold, smeared on a 1x screen. Latin subset
+   (U+0000-00FF covers French and German accents), from @fontsource-variable/karla
+   5.3.0, SIL Open Font License 1.1. */
+@font-face {
+  font-family: 'Karla';
+  src: url('./assets/fonts/Karla-Variable.woff2') format('woff2');
+  font-weight: 200 800;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./assets/fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./assets/fonts/JetBrainsMono-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+}
+
+/* Tailwind v4 theme configuration
+   Variable naming follows shadcn/ui conventions */
+@theme {
+  --font-display: 'Forum', serif;
+  /* The Chinese interface needs glyphs Karla and JetBrains Mono do not have.
+     The system's own CJK fonts follow as fallbacks only; Latin text is
+     unchanged, and no web font is added. The Japanese interface has its own
+     fonts first (the :root:lang(ja) rule below): the same Han characters are
+     drawn differently in Chinese and in Japanese, so one list cannot serve both. */
+  --font-body: 'Karla', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', monospace;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius: 0.375rem;
+
+  /* Core colors.
+     The accent is the orange of the application icon's chevron, #C04500. The
+     amber this replaced came with the TransHub port and matched nothing the
+     product ships with: not the icon, not the menu-bar glyph, not the CLI.
+     Every pair below was measured for WCAG AA (4.5:1) as text on its ground. */
+  --color-background: #fafaf7;
+  --color-foreground: #1a1917;
+
+  --color-card: #ffffff;
+  --color-card-foreground: #1a1917;
+  --color-card-hover: #f4f3ef;
+
+  --color-popover: #ffffff;
+  --color-popover-foreground: #1a1917;
+
+  /* Primary = the main action. White on #C04500 is 5.1:1. */
+  --color-primary: #c04500;
+  --color-primary-foreground: #ffffff;
+
+  /* Secondary = subtle background */
+  --color-secondary: #f4f3ef;
+  --color-secondary-foreground: #1a1917;
+
+  /* Muted = muted background + foreground for grey text (5.3:1 on the ground) */
+  --color-muted: #f4f3ef;
+  --color-muted-foreground: #6b6862;
+
+  /* Accent = the tinted ground of what is selected or hovered, with the
+     darker orange that reads on it (6.3:1). */
+  --color-accent: #fbede4;
+  --color-accent-foreground: #9a3600;
+
+  /* Destructive = danger/error actions */
+  --color-destructive: #b42318;
+  --color-destructive-foreground: #ffffff;
+  --color-destructive-light: #fdecea;
+
+  --color-border: #e6e4de;
+  --color-border-subtle: #efede8;
+  --color-input: #ecebe6;
+  --color-ring: #c04500;
+
+  /* Sidebar */
+  --color-sidebar: #f3f2ee;
+  --color-sidebar-foreground: #1a1917;
+  --color-sidebar-border: #e6e4de;
+  --color-sidebar-ring: #c04500;
+  --color-sidebar-accent: #fbede4;
+  --color-sidebar-accent-foreground: #9a3600;
+  --color-sidebar-primary: #c04500;
+  --color-sidebar-primary-foreground: #ffffff;
+
+  /* Custom TransHub tokens */
+  /* Terminal output follows the theme like everything else. A dark panel in a
+     light window is a dark widget, not a theme. */
+  --color-terminal: oklch(0.985 0.003 70);
+  --color-terminal-foreground: oklch(0.22 0.008 250);
+
+  /* Status colours, each a text colour that passes on its own light ground. */
+  --color-success: #276b3f;
+  --color-success-light: #e5f2ea;
+  --color-warning: #9a6200;
+  --color-warning-light: #fdf3dc;
+  --color-info: #1f5fa8;
+  --color-info-light: #e6eef8;
+  --color-pro: #c04500;
+  --color-pro-light: #fbede4;
+
+  /* A gauge below its threshold is graphite, not green: a page of green bars
+     says "fine" so loudly that the one amber bar is the thing you miss. */
+  --color-meter: #3a3936;
+  --color-sunk: #ecebe6;
+
+  /* Shadows */
+  --shadow-card: 0 1px 3px oklch(0 0 0 / 0.04), 0 0 0 1px oklch(0 0 0 / 0.05);
+  --shadow-card-hover: 0 2px 8px oklch(0 0 0 / 0.08), 0 0 0 1px oklch(0 0 0 / 0.06);
+  --shadow-dialog: 0 8px 32px oklch(0 0 0 / 0.14);
+  --shadow-dropdown: 0 4px 16px oklch(0 0 0 / 0.1);
+
+  /* Terminal — matches theme background so container blends with xterm canvas */
+  --color-term-bg: oklch(0.97 0 0);
+  --color-term-fg: oklch(0.14 0 0);
+}
+
+/* Dark theme */
+.dark {
+  --color-background: #121211;
+  --color-foreground: #edebe6;
+
+  --color-card: #1b1a18;
+  --color-card-foreground: #edebe6;
+  --color-card-hover: #232220;
+
+  --color-popover: #1f1e1c;
+  --color-popover-foreground: #edebe6;
+
+  /* Brighter orange on dark, with dark text on it: white on this orange is
+     3.5:1, near-black is 5.6:1. */
+  --color-primary: #e8671f;
+  --color-primary-foreground: #141312;
+
+  --color-secondary: #232220;
+  --color-secondary-foreground: #edebe6;
+
+  --color-muted: #232220;
+  --color-muted-foreground: #a39f97;
+
+  --color-accent: #3a2416;
+  --color-accent-foreground: #f4a26f;
+
+  --color-destructive: #e5534b;
+  --color-destructive-foreground: #141312;
+  --color-destructive-light: #3a1e1b;
+
+  --color-border: #2d2b28;
+  --color-border-subtle: #252422;
+  --color-input: #2d2b28;
+  --color-ring: #e8671f;
+
+  --color-sidebar: #161514;
+  --color-sidebar-foreground: #edebe6;
+  --color-sidebar-border: #2d2b28;
+  --color-sidebar-ring: #e8671f;
+  --color-sidebar-accent: #3a2416;
+  --color-sidebar-accent-foreground: #f4a26f;
+  --color-sidebar-primary: #e8671f;
+  --color-sidebar-primary-foreground: #141312;
+
+  --color-success: #5fbf83;
+  --color-success-light: #1c2e22;
+  --color-warning: #e3a93b;
+  --color-warning-light: #33281a;
+  --color-info: #7fb0ea;
+  --color-info-light: #1a2636;
+  --color-pro: #e8671f;
+  --color-pro-light: #3a2416;
+  --color-meter: #cfcbc3;
+  --color-sunk: #2d2b28;
+
+  --shadow-card: 0 1px 3px oklch(0 0 0 / 0.2), 0 0 0 1px oklch(1 0 0 / 0.05);
+  --shadow-card-hover: 0 2px 8px oklch(0 0 0 / 0.3), 0 0 0 1px oklch(1 0 0 / 0.06);
+
+  --color-term-bg: oklch(0.12 0 0);
+  --color-term-fg: oklch(0.9 0 0);
+}
+
+/* ==============================
+   Base styles
+   ============================== */
+
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Tailwind 4 draws a bare `border` in the text colour, which made every
+   outlined button and input near-black. The theme's border colour is the
+   default instead, as shadcn/ui sets it; a component that wants another still
+   names it. In the base layer so any utility wins over it. */
+@layer base {
+  *, ::before, ::after, ::backdrop {
+    border-color: var(--color-border);
+  }
+}
+
+/* Japanese: its own fonts, and not the Chinese ones, so a character both languages
+   write (令, 直, 骨...) takes its Japanese form and a line is not set in two fonts.
+   documentElement.lang follows the chosen language (ui/src/lib/i18n.ts). */
+:root:lang(ja) {
+  --font-body: 'Karla', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Yu Gothic UI', 'Hiragino Kaku Gothic ProN', 'Noto Sans CJK JP', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Fira Code', 'Yu Gothic UI', 'Hiragino Kaku Gothic ProN', 'Noto Sans CJK JP', monospace;
+}
+
+body {
+  font-family: var(--font-body);
+}
+
+@keyframes welcome-arrive {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.welcome-illustration { animation: welcome-arrive 450ms ease-out both; }
+.welcome-copy { animation: welcome-arrive 250ms ease-out both; }
+.welcome-dialog { max-height: calc(100dvh - 2rem); overflow-y: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome-illustration, .welcome-copy { animation: none; }
+  .sidebar-nav { transition: none; }
+}
+
+/* Title bar drag region, for the desktop application's hidden title bar */
+.drag-region {
+  -webkit-app-region: drag;
+}
+
+/* Anything you can press inside a draggable bar has to opt back out, or the
+   click moves the window instead. Listed here once rather than remembered on
+   every button a header happens to hold. */
+.drag-region :is(button, a, input, select, textarea, label, [role='button'], [role='tab'], [role='tablist']) {
+  -webkit-app-region: no-drag;
+}
+
+/* Windows and Linux draw minimise, maximise and close over the right end of
+   the page header (Window Controls Overlay). The titlebar-area variables say
+   where the free part of the bar is; whatever lies right of it belongs to the
+   system. Outside the overlay the fallbacks make the reservation zero. */
+:root {
+  --titlebar-controls: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+}
+
+.page-header {
+  padding-right: calc(1rem + var(--titlebar-controls));
+}
+
+@media (min-width: 640px) {
+  .page-header { padding-right: calc(2rem + var(--titlebar-controls)); }
+}
+
+/* Under the session tabs the header is no longer the top row: the tabs are,
+   and they make the room instead. */
+.page-header.under-tabs {
+  padding-right: 2rem;
+}
+
+.titlebar-safe {
+  padding-right: var(--titlebar-controls);
+}
+
+.no-drag {
+  -webkit-app-region: no-drag !important;
+}
+
+/* Ensure sidebar is always clickable in Electron (not blocked by drag regions) */
+.sidebar-nav {
+  -webkit-app-region: no-drag !important;
+  pointer-events: auto !important;
+  position: relative;
+  z-index: 10;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: oklch(0.7 0 0 / 0.3);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.5 0 0 / 0.5);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: oklch(0.5 0 0 / 0.3);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.6 0 0 / 0.5);
+}
+
+/* Selection */
+::selection {
+  background: var(--color-accent);
+  color: var(--color-foreground);
+}
+
+/* Allotment sash — centered grip handle like Flutter version */
+:root {
+  --sash-size: 12px;
+  --sash-hover-size: 4px;
+}
+
+/* Gap area: subtle background to visually separate the two panes */
+[class*='allotment-module_sashContainer'] > [class*='sash-module_sash'][class*='vertical'] {
+  background: var(--color-muted);
+  box-shadow:
+    inset 1px 0 0 var(--color-border),
+    inset -1px 0 0 var(--color-border);
+}
+
+/* Grip handle: small centered pill instead of full-height bar */
+[class*='allotment-module_sashContainer'] > [class*='sash-module_sash']::before {
+  height: 40px !important;
+  width: 4px !important;
+  top: 50% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%) !important;
+  border-radius: 2px !important;
+  background: var(--color-muted-foreground) !important;
+  opacity: 0.4;
+  transition:
+    background-color 150ms ease,
+    opacity 150ms ease !important;
+}
+
+/* Grip handle hover/active: accent color, full opacity */
+[class*='allotment-module_sashContainer'] > [class*='sash-module_sash'][class*='hover']::before,
+[class*='allotment-module_sashContainer'] > [class*='sash-module_sash'][class*='active']::before,
+[class*='allotment-module_sashContainer'] > [class*='sash-module_sash']:hover::before {
+  background: var(--color-accent) !important;
+  opacity: 1;
+}
+
+/* Hide scrollbar for breadcrumb */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Transition utilities */
+.transition-theme {
+  transition:
+    background-color 200ms ease,
+    color 200ms ease,
+    border-color 200ms ease;
+}
+
+/* Streaming indicator ring animation */
+@keyframes streaming-ring {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+.animate-streaming-ring {
+  animation: streaming-ring 1.5s ease-in-out infinite;
+}
+
+/* Animated gradient border — snake trail effect */
+@property --border-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.gradient-border-snake::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: conic-gradient(
+    from var(--border-angle),
+    transparent 0%,
+    transparent 65%,
+    oklch(0.75 0.17 55 / 0.3) 78%,
+    oklch(0.65 0.19 300) 85%,
+    oklch(0.65 0.17 210) 90%,
+    oklch(0.75 0.17 70) 93%,
+    transparent 100%
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: gradient-border-spin 4s linear infinite;
+  pointer-events: none;
+  z-index: 2;
+}
+
+@keyframes gradient-border-spin {
+  to {
+    --border-angle: 360deg;
+  }
+}
+
+/* Thinking shimmer — gradient sweep across text */
+@keyframes thinking-shimmer {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+.animate-thinking-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-muted-foreground) 0%,
+    var(--color-muted-foreground) 35%,
+    var(--color-foreground) 50%,
+    var(--color-muted-foreground) 65%,
+    var(--color-muted-foreground) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thinking-shimmer 2.5s ease-in-out infinite;
+}
+
+/* Thinking icon pulse */
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    opacity: 0.7;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+.animate-thinking-pulse {
+  animation: thinking-pulse 2s ease-in-out infinite;
+}
+
+/* ==============================
+   Chat redesign tokens (light-only for now)
+   Editorial cream palette + coral accent, used by components/chrome/*
+   and the refreshed chat surface. Safe to coexist with shadcn tokens above.
+   ============================== */
+:root {
+  /* Surfaces */
+  --cream: oklch(0.985 0.006 80);
+  --cream-2: oklch(0.97 0.008 75);
+
+  /* Ink scale (text) */
+  --ink-1: oklch(0.18 0.008 60);
+  --ink-2: oklch(0.36 0.006 60);
+  --ink-3: oklch(0.54 0.006 60);
+  --ink-4: oklch(0.72 0.006 60);
+
+  /* Lines */
+  --line: oklch(0.91 0.006 60);
+  --line-soft: oklch(0.94 0.006 60);
+
+  /* Accent — coral transhub */
+  --coral: oklch(0.6 0.17 45);
+  --coral-soft: oklch(0.93 0.04 70);
+
+  /* Titlebar — warm gray, markedly darker than --cream so the tab strip pops. */
+  --titlebar: oklch(0.93 0.005 70);
+
+  /* Chat bubbles */
+  --user-bubble: oklch(0.935 0.015 60);
+  --asst-bubble: oklch(0.975 0.004 60);
+
+  /* Density — defaults match "cozy" (app default) */
+  --thread-max: 780px;
+  --thread-pad-y: 20px;
+  --msg-gap: 18px;
+  --msg-pad-y: 10px;
+  --msg-pad-x: 14px;
+  --msg-radius: 12px;
+  --msg-font: 13.5px;
+  --msg-line: 1.55;
+  --tabs-pad-y: 8px;
+  --tabs-font: 12.5px;
+}
+
+/* Dark-mode overrides for the paper palette.
+   Components consume these tokens via var(--…) everywhere, so redefining
+   them inside .dark is enough to flip the whole UI — no component rewrites. */
+.dark {
+  /* Surfaces — warm charcoal */
+  --cream: oklch(0.18 0.006 60);
+  --cream-2: oklch(0.22 0.007 60);
+
+  /* Ink scale — inverted, light on dark */
+  --ink-1: oklch(0.96 0.005 70);
+  --ink-2: oklch(0.82 0.005 70);
+  --ink-3: oklch(0.66 0.006 70);
+  --ink-4: oklch(0.48 0.006 70);
+
+  /* Lines — subtle on dark */
+  --line: oklch(0.32 0.006 60);
+  --line-soft: oklch(0.27 0.006 60);
+
+  /* Coral — slightly brighter for AA contrast on dark surfaces */
+  --coral: oklch(0.72 0.17 45);
+  --coral-soft: oklch(0.28 0.05 45);
+
+  /* Chat bubbles */
+  --user-bubble: oklch(0.28 0.015 60);
+  --asst-bubble: oklch(0.22 0.005 60);
+
+  /* Titlebar — lifted header, slightly lighter than --cream for elevation. */
+  --titlebar: oklch(0.14 0.006 60);
+}
+
+[data-density='airy'] {
+  --thread-max: 760px;
+  --thread-pad-y: 36px;
+  --msg-gap: 32px;
+  --msg-pad-y: 16px;
+  --msg-pad-x: 20px;
+  --msg-radius: 18px;
+  --msg-font: 15.5px;
+  --msg-line: 1.7;
+  --tabs-pad-y: 12px;
+  --tabs-font: 13px;
+}
+
+[data-density='cozy'] {
+  --thread-max: 780px;
+  --thread-pad-y: 20px;
+  --msg-gap: 18px;
+  --msg-pad-y: 10px;
+  --msg-pad-x: 14px;
+  --msg-radius: 12px;
+  --msg-font: 13.5px;
+  --msg-line: 1.55;
+  --tabs-pad-y: 8px;
+  --tabs-font: 12.5px;
+}
+
+[data-density='compact'] {
+  --thread-max: 920px;
+  --thread-pad-y: 10px;
+  --msg-gap: 8px;
+  --msg-pad-y: 6px;
+  --msg-pad-x: 10px;
+  --msg-radius: 8px;
+  --msg-font: 12.5px;
+  --msg-line: 1.45;
+  --tabs-pad-y: 5px;
+  --tabs-font: 11.5px;
+}
+
+/* Message entry animation used by the new MessageBubble */
+@keyframes chat-msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 3-dots thinking used by the new bubbles (not the shimmer one above) */
+@keyframes chat-dots-blink {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+/* Utility: every chat message row fades + slides in on mount (identity pinned
+   by React key, so the animation runs once per message, not on re-renders) */
+.chat-msg-row {
+  animation: chat-msg-in 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* Meta line below each bubble ("TOI" / "OPUS"). Hidden in compact density. */
+[data-density='compact'] .chat-meta {
+  display: none;
+}
+
+/* ==============================
+   .paper-surface — scoped palette override for the redesigned chat page.
+   Rebinds shadcn/Tailwind color tokens to the cream/ink palette inside the
+   scope, so every `bg-background`, `border-border`, `text-muted-foreground`,
+   etc. used by child components (sidebar, toolbar, bubbles, pane chrome) is
+   transformed at once — no per-component restyling needed for the base coat.
+   Per-component visual touches (session tabs, toolbar spacing, meta font) can
+   still layer on top via explicit classes or inline styles.
+   ============================== */
+.paper-surface {
+  --color-background: var(--cream);
+  --color-foreground: var(--ink-1);
+  --color-card: var(--cream);
+  --color-card-foreground: var(--ink-1);
+  --color-card-hover: var(--cream-2);
+  --color-popover: oklch(0.995 0.005 70);
+  --color-popover-foreground: var(--ink-1);
+  --color-primary: var(--coral);
+  --color-primary-foreground: oklch(0.99 0 0);
+  --color-secondary: var(--cream-2);
+  --color-secondary-foreground: var(--ink-1);
+  --color-muted: var(--cream-2);
+  --color-muted-foreground: var(--ink-3);
+  --color-accent: var(--coral-soft);
+  --color-accent-foreground: var(--coral);
+  --color-border: var(--line);
+  --color-border-subtle: var(--line-soft);
+  --color-input: var(--cream-2);
+  --color-ring: var(--coral);
+
+  --color-sidebar: var(--cream-2);
+  --color-sidebar-foreground: var(--ink-1);
+  --color-sidebar-border: var(--line-soft);
+  --color-sidebar-ring: var(--coral);
+  --color-sidebar-accent: var(--coral-soft);
+  --color-sidebar-accent-foreground: var(--coral);
+  --color-sidebar-primary: var(--coral);
+  --color-sidebar-primary-foreground: oklch(0.24 0.03 70);
+
+  background: var(--cream);
+  color: var(--ink-1);
+  font-family: var(--font-body);
+}
+
+/* Dark-mode tweaks for .paper-surface: the light remap assumes white-ish
+   popovers and near-white primary-foregrounds; on dark we need the popover
+   to float *above* the surface (lighter), and coral's foreground flips to
+   near-black for legibility on bright coral. */
+.dark .paper-surface {
+  --color-popover: oklch(0.24 0.006 60);
+  --color-primary-foreground: oklch(0.12 0 0);
+  --color-sidebar-primary-foreground: oklch(0.12 0 0);
+}
+
+/* Display-font headings + mono path styling used inside .paper-surface
+   (applied via utility classes on key text nodes). */
+.paper-surface .chat-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.005em;
+}
+.paper-surface .chat-mono {
+  font-family: var(--font-mono);
+}

@@ -1,0 +1,798 @@
+/**
+ * The desktop application.
+ *
+ * ## Why the app *is* the control plane
+ *
+ * The obvious shape would be a window that launches `ssh-manager control` and
+ * points at it. That is what the earlier 104 KB Swift shell did, and it has one
+ * flaw that disqualifies it as a product: it needs Node and the npm package
+ * already installed. Somebody who downloads a `.dmg` has neither, and telling
+ * them to install Node first is telling them to use the CLI.
+ *
+ * So this process imports the control plane and runs it in-process. Electron
+ * already ships a Node runtime; using it means the app is genuinely
+ * self-contained, with no second process to supervise, no port handshake to get
+ * wrong, and no orphan left behind when the window is closed.
+ *
+ * ## What the window is
+ *
+ * A BrowserWindow on `http://127.0.0.1:<port>/?token=…` — the same interface
+ * `ssh-manager control` serves, byte for byte. There is deliberately no
+ * separate desktop UI: two implementations of the same screens is exactly the
+ * trap this project climbed out of when the single-file page was deleted.
+ */
+import { app, BrowserWindow, dialog, Menu, nativeTheme, shell, Tray, nativeImage, Notification } from 'electron';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { createRequire } from 'module';
+// electron-updater is CommonJS: named imports do not resolve through the bridge.
+import electronUpdater from 'electron-updater';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { localShellLaunch, localShellName } from './local-shell.mjs';
+import { nativeLanguage, nativeText } from './locale.mjs';
+import { applicationMenuTemplate } from './native-menu.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The language of the menus, tray and notifications: the one chosen in the
+ * interface, else the system's. Read each time, because it can change while the
+ * application runs. `app.getLocale()` is only meaningful once the app is ready,
+ * and every caller runs after that.
+ */
+const nativeLang = () => nativeLanguage({ systemLocale: app.getLocale() });
+const text = (message, values) => nativeText(message, values, nativeLang());
+
+/**
+ * The engine lives two directories up in the repository, and inside
+ * `app.asar.unpacked` in a packaged build. Resolved rather than assumed,
+ * because getting it wrong produces a blank window and no clue why.
+ */
+// The engine defaults its log and history to files beside its own source, which
+// here is *inside the application bundle*. One file added there breaks the code
+// signature — `codesign --verify` then reports a sealed resource as invalid and
+// Gatekeeper refuses the app — and it happened: a single launch was enough.
+// Set before the engine is imported, because the logger reads these once.
+// Release smoke tests must not touch the machine's real Electron profile.
+const smokeTest = process.argv.includes('--release-smoke-test');
+const previewHome = process.env.SSH_MANAGER_PREVIEW_HOME;
+if (previewHome) {
+  if (!path.isAbsolute(previewHome) || previewHome !== process.env.SSH_MANAGER_HOME) {
+    throw new Error('Candidate previews require matching absolute SSH_MANAGER_PREVIEW_HOME and SSH_MANAGER_HOME');
+  }
+  // A temporary vault alone does not isolate Chromium or native file dialogs.
+  // Set every profile path before ready; the launcher also supplies a fake OS
+  // home to the engine and local shell without changing the parent shell.
+  const paths = {
+    appData: 'app-data', userData: 'electron', sessionData: 'electron/session',
+    logs: 'logs', crashDumps: 'crashes', home: 'home', desktop: 'home/Desktop',
+    documents: 'home/Documents', downloads: 'home/Downloads',
+  };
+  for (const [name, relative] of Object.entries(paths)) {
+    const target = path.join(previewHome, relative);
+    fs.mkdirSync(target, { recursive: true });
+    app.setPath(name, target);
+  }
+}
+if (smokeTest) {
+  if (!process.env.SSH_MANAGER_HOME || !process.env.SSH_RELEASE_SMOKE_RESULT) {
+    throw new Error('Release smoke tests require an isolated SSH_MANAGER_HOME and result path');
+  }
+  app.setPath('userData', path.join(process.env.SSH_MANAGER_HOME, 'electron'));
+}
+const userData = app.getPath('userData');
+// Electron does not create this until something asks it to, and the logger
+// appends without making directories.
+fs.mkdirSync(userData, { recursive: true });
+process.env.SSH_LOG_FILE ||= path.join(userData, 'ssh-manager.log');
+process.env.SSH_HISTORY_FILE ||= path.join(userData, 'command-history.json');
+
+// node-pty is CommonJS with a native binding; `import` of a .node through the
+// ESM bridge does not resolve. createRequire is the supported way in.
+const require = createRequire(import.meta.url);
+
+/**
+ * A shell on this machine, for the control plane to hand to the interface.
+ *
+ * This is the whole reason the desktop build differs from the npm one. A
+ * pseudo-terminal needs `forkpty`, a native module; the engine has none and is
+ * not going to grow one, because it installs on machines with no compiler.
+ * Here there is a toolchain, node-pty ships N-API prebuilds that Electron loads
+ * as they are, and the result is a real terminal — colours, `vim`, Ctrl-C and
+ * a window size that follows the pane.
+ *
+ * Returns null when the module is missing rather than throwing: a build without
+ * it is a build with no local shell, not a broken application. The interface
+ * asks the control plane whether one exists before offering it.
+ *
+ * @returns {import('../../src/control-plane.js').LocalShellFactory|null}
+ */
+function localShellProvider() {
+  /** @type {typeof import('node-pty')} */
+  let pty;
+  try {
+    pty = require('node-pty');
+  } catch (error) {
+    console.error('No local shell in this build:', error.message);
+    return null;
+  }
+
+  return async ({ cols, rows, cwd }) => {
+    // The user's own login shell, because that is what "a terminal on this
+    // machine" means to them — their aliases, their prompt, their PATH. A
+    // login shell: opened from the Dock this process has launchd's bare PATH,
+    // and only a login shell reads the profile that adds Homebrew's.
+    const { file, args, env } = localShellLaunch();
+
+    const term = pty.spawn(file, args, {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd: cwd || os.homedir(),
+      env,
+    });
+
+    return {
+      shell: localShellName(file),
+      onData: handler => term.onData(handler),
+      onExit: handler => term.onExit(() => handler()),
+      // node-pty writes strings. What arrives is the UTF-8 of exactly what the
+      // user typed, so decoding it back is lossless.
+      write: data => term.write(data.toString('utf8')),
+      resize: (nextCols, nextRows) => term.resize(nextCols, nextRows),
+      kill: () => term.kill(),
+    };
+  };
+}
+
+function engineRoot() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'engine')
+    : path.join(__dirname, '..', '..');
+}
+
+/**
+ * This application as Options → AI tools offers it to Claude Code, Claude
+ * Desktop or Codex: the binary that runs its engine. Looking in /Applications
+ * the way `ssh-manager control` does would miss a copy kept anywhere else.
+ */
+function ownInstallation() {
+  if (!app.isPackaged) return undefined;
+  const installed = process.platform === 'darwin'
+    ? path.resolve(process.execPath, '..', '..', '..')
+    : process.platform === 'linux' && process.env.APPIMAGE ? process.env.APPIMAGE : process.execPath;
+  return { desktop: () => ({ supported: true, installed: true, path: installed, version: app.getVersion(), method: null }) };
+}
+
+/** @type {import('../../src/control-plane.js').ControlPlane|null} */
+let plane = null;
+/** @type {BrowserWindow|null} */
+let mainWindow = null;
+/** @type {Tray|null} Module-level, or it is garbage collected and vanishes. */
+let tray = null;
+/** What the menu was last built from, so it is only rebuilt when it changed. */
+let trayState = '';
+/** Requests already announced, so a queue that stays full is not announced twice. */
+const announced = new Set();
+/**
+ * What the updater is doing. Shown in the menu bar, and handed to the control
+ * plane so the window can show it too (Options → Updates, the sidebar), because
+ * an update that is only visible in a menu most people never open is not an
+ * update anyone ever installs.
+ * @type {{status: 'idle'|'checking'|'available'|'downloading'|'ready'|'error', version: string|null, percent: number, checkedAt: string|null, error: string|null}}
+ */
+let update = { status: 'idle', version: null, percent: 0, checkedAt: null, error: null };
+/** Whether the updater was started: a packaged build, and not a candidate preview. */
+let updaterActive = false;
+/** Who is told when `update` changes: the control plane, which tells the window. */
+const updateListeners = new Set();
+
+function updateSnapshot() {
+  return {
+    currentVersion: app.getVersion(),
+    status: update.status,
+    ...(update.version ? { version: update.version } : {}),
+    ...(update.status === 'downloading' || update.status === 'ready' ? { percent: update.percent } : {}),
+    ...(update.checkedAt ? { checkedAt: update.checkedAt } : {}),
+    ...(update.error ? { error: update.error } : {}),
+    // A preview build is offered newer previews as well as the stable release.
+    channel: app.getVersion().includes('-') ? 'preview' : 'stable',
+  };
+}
+
+/** What the control plane offers the window: see AppUpdates in control-plane.js. */
+const appUpdates = {
+  snapshot: updateSnapshot,
+  check: async () => {
+    if (!updaterActive) throw new Error(text('Updates are turned off in this build'));
+    await electronUpdater.autoUpdater.checkForUpdates();
+  },
+  download: async () => { await electronUpdater.autoUpdater.downloadUpdate(); },
+  install: () => electronUpdater.autoUpdater.quitAndInstall(),
+  subscribe: listener => {
+    updateListeners.add(listener);
+    return () => updateListeners.delete(listener);
+  },
+};
+
+async function startControlPlane() {
+  const root = engineRoot();
+  const { ControlPlane } = await import(pathToFileURL(path.join(root, 'src', 'control-plane.js')).href);
+  const { defaultSocketPath } = await import(pathToFileURL(path.join(root, 'src', 'approval.js')).href);
+
+  plane = new ControlPlane({
+    socketPath: defaultSocketPath(),
+    port: 0,
+    // Packaged, `dist/ui` sits next to the engine rather than in the source
+    // tree; the control plane resolves it relative to its own file, so nothing
+    // extra is needed here.
+    agents: ownInstallation(),
+    // Only a packaged build has a feed and a version to compare; a checkout run
+    // from source has nothing to update.
+    appUpdates: app.isPackaged ? appUpdates : null,
+  });
+  plane.setLocalShellProvider(localShellProvider());
+  return plane.start();
+}
+
+/**
+ * The colours the Windows and Linux window buttons are drawn in: the page's
+ * own ground and text, so the three buttons look like part of the header they
+ * sit on rather than a grey patch pasted over its corner. Follows the system
+ * theme, as the page does unless the user forced one in Options.
+ */
+function titleBarOverlay() {
+  const dark = nativeTheme.shouldUseDarkColors;
+  return { color: dark ? '#121211' : '#fafaf7', symbolColor: dark ? '#edebe6' : '#1a1917', height: 48 };
+}
+
+function createWindow(url) {
+  const mac = process.platform === 'darwin';
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 840,
+    minWidth: 900,
+    minHeight: 600,
+    // The page's own ground, in whichever theme it will resolve to. A fixed
+    // light colour here flashes white for a beat before a dark page paints —
+    // the one moment of the launch anybody actually watches.
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#121211' : '#fafaf7',
+    // No title bar of the system's own on any platform. On macOS the three
+    // buttons float over the rail's top row; on Windows and Linux the system
+    // draws minimise, maximise and close over the right end of the page
+    // header (Window Controls Overlay), and the page reserves their width from
+    // the `env(titlebar-area-*)` CSS variables. Before 4.0 Windows and Linux
+    // kept a native title bar above a header that repeated what it said.
+    titleBarStyle: mac ? 'hiddenInset' : 'hidden',
+    ...(mac ? {} : { titleBarOverlay: titleBarOverlay() }),
+    // Centred in the rail's 48px top row: the buttons are 12px tall.
+    trafficLightPosition: { x: 18, y: 18 },
+    show: false,
+    webPreferences: {
+      // The page is served over HTTP by our own process and needs nothing from
+      // Electron: no preload, no node integration, context isolated. It talks
+      // to the control plane the same way a browser tab would.
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  // Granted rather than prompted: an approval request that goes unseen is the
+  // one failure this whole feature exists to prevent, and a permission dialog
+  // for a window the user just opened themselves is noise. Only notifications —
+  // everything else is still refused.
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === 'notifications');
+  });
+
+  // Shown once painted rather than immediately: a window that appears empty and
+  // fills in a second later looks broken.
+  mainWindow.once('ready-to-show', () => mainWindow?.show());
+
+  // Anything that is not our own page opens in the real browser. The window
+  // holds a token that approves commands on production servers; a link in a
+  // file listing must not be able to navigate it somewhere else.
+  mainWindow.webContents.setWindowOpenHandler(({ url: target }) => {
+    void shell.openExternal(target);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, target) => {
+    if (!target.startsWith(url.split('/?')[0])) {
+      event.preventDefault();
+      void shell.openExternal(target);
+    }
+  });
+
+  // The page has to reserve room for the window buttons, which a hidden title
+  // bar draws *over* the content. It cannot know that on its own — the same
+  // page is served to an ordinary browser tab, where there is nothing to avoid.
+  // `plain`, what this sent before 4.0, still means "a system title bar" to the
+  // page, so an older application showing a newer engine's page stays right.
+  const inset = mac ? 'macos' : 'overlay';
+  void mainWindow.loadURL(`${url}&shell=${inset}`);
+
+  if (!mac) {
+    const recolour = () => mainWindow?.setTitleBarOverlay(titleBarOverlay());
+    nativeTheme.on('updated', recolour);
+    mainWindow.on('closed', () => nativeTheme.removeListener('updated', recolour));
+  }
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+/** The language the application menu was last built in. */
+let menuLanguage = null;
+
+/** A menu with the shortcuts a terminal-adjacent app is expected to have. */
+function buildMenu(url) {
+  menuLanguage = nativeLang();
+  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate({
+    isMac: process.platform === 'darwin',
+    language: menuLanguage,
+    onOpenBrowser: () => void shell.openExternal(url),
+    onCheckUpdates: () => void appUpdates.check().catch(() => { /* shown in Options → Updates */ }),
+  })));
+}
+
+/**
+ * The menu-bar item.
+ *
+ * ## Why an app that already has a window needs one
+ *
+ * The window is where you *do* things. The menu bar is where you find out that
+ * there is something to do — which matters here more than in most apps, because
+ * the thing worth knowing is that an agent is blocked waiting for you, and you
+ * are by definition looking at something else when it happens. A notification
+ * says it once; the menu bar keeps saying it until you deal with it.
+ *
+ * The icon carries a count when something is waiting, so the answer to "is
+ * anything blocked on me?" costs a glance rather than a window switch.
+ *
+ * Everything shown here is read straight off the in-process control plane —
+ * `pending`, `terminals`, `streams`, the vault — because the app *is* the
+ * control plane. There is no IPC and nothing to keep in sync.
+ */
+/**
+ * Native notifications, posted from the main process.
+ *
+ * The page can raise a Web Notification and does, in a browser tab. Inside the
+ * desktop app that is the wrong door: the notification is attributed to the
+ * renderer rather than the application, macOS has no authorisation on file for
+ * it, and on Windows it needs an AppUserModelID the renderer cannot set. In
+ * practice it silently does not appear, which for this feature is the worst
+ * possible failure — the whole promise is that you are told when an agent is
+ * blocked on you.
+ *
+ * So the desktop app posts them here instead, with the identity the installer
+ * registered, and the page stands down when it is running inside a shell.
+ *
+ * @param {any[]} pending - Requests currently waiting on a decision
+ */
+function announce(pending) {
+  if (!Notification.isSupported()) return;
+
+  const waiting = new Set(pending.map(request => request.id));
+  for (const id of [...announced]) if (!waiting.has(id)) announced.delete(id);
+
+  for (const request of pending) {
+    if (announced.has(request.id)) continue;
+    announced.add(request.id);
+
+    const notification = new Notification({
+      title: request.destructive
+        ? text('{{v0}}: destructive command waiting', { v0: request.server })
+        : text('{{v0}}: waiting for your decision', { v0: request.server }),
+      body: String(request.command || request.tool || '').slice(0, 220),
+      // Destructive requests stay on screen. `rm -rf` on production and
+      // `systemctl status` are not the same interruption, and a banner that
+      // fades after four seconds is a banner that gets missed.
+      urgency: request.destructive ? 'critical' : 'normal',
+      timeoutType: request.destructive ? 'never' : 'default',
+      silent: false,
+    });
+    notification.on('click', () => {
+      if (mainWindow) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      } else if (plane) {
+        createWindow(plane.url);
+      }
+    });
+    notification.show();
+  }
+}
+
+function refreshTray() {
+  if (!tray || !plane) return;
+
+  // The map holds { request, settle, receivedAt }; the request is inside it.
+  // Reading the wrapper's fields directly is how this first shipped a menu
+  // saying "undefined ·" twice.
+  const pending = [...plane.pending.values()].map(entry => entry.request);
+  const shells = [...plane.terminals.values()];
+  const running = plane.streams.list().filter(s => s.code === null);
+  let servers = [];
+  try {
+    servers = plane.store.exists() ? plane.store.listServers() : [];
+  } catch {
+    // An unreadable vault is the interface's problem to report, not the tray's.
+  }
+
+  // The application menu follows the language chosen in the interface, which
+  // can change while the app runs. Rebuild it only when that happens.
+  if (menuLanguage !== nativeLang()) buildMenu(plane.url);
+
+  // Rebuilding a menu the user may have open is disruptive, and this runs on a
+  // timer, so only touch it when something actually moved.
+  const signature = JSON.stringify([
+    pending.map(r => r.id), shells.map(t => t.server),
+    running.map(s => s.id), servers, update.status, update.percent, nativeLang(),
+  ]);
+  if (signature === trayState) return;
+  trayState = signature;
+
+  announce(pending);
+
+  const focus = () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    } else if (plane) {
+      createWindow(plane.url);
+    }
+  };
+
+  /** A command short enough for a menu, with the end kept: that is where the path is. */
+  const brief = (text, max = 46) => {
+    const flat = String(text || '').replace(/\s+/g, ' ').trim();
+    return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+  };
+
+  /** @type {Electron.MenuItemConstructorOptions[]} */
+  const template = [...updateMenuItems()];
+
+  if (pending.length) {
+    template.push({ label: text('{{v0}} waiting for your decision', { v0: pending.length }), enabled: false });
+    for (const request of pending.slice(0, 6)) {
+      template.push({
+        label: `    ${request.server} · ${brief(request.command)}`,
+        click: focus,
+      });
+    }
+    template.push({ type: 'separator' });
+  } else {
+    template.push({ label: text('Nothing is waiting'), enabled: false });
+    template.push({ type: 'separator' });
+  }
+
+  if (shells.length || running.length) {
+    template.push({ label: text('Open right now'), enabled: false });
+    for (const shell of shells.slice(0, 5)) {
+      template.push({ label: text('    Shell on {{v0}}', { v0: shell.server }), click: focus });
+    }
+    for (const stream of running.slice(0, 5)) {
+      template.push({
+        label: `    ${stream.server} · ${brief(stream.command, 38)}`,
+        click: focus,
+      });
+    }
+    template.push({ type: 'separator' });
+  }
+
+  if (servers.length) {
+    template.push({
+      label: text('Servers ({{v0}})', { v0: servers.length }),
+      submenu: servers.slice(0, 12).map(name => ({ label: name, click: focus })),
+    });
+    template.push({ type: 'separator' });
+  }
+
+  template.push(
+    { label: text('Show SSH Manager'), click: focus },
+    { label: text('Open in browser'), click: () => plane && void shell.openExternal(plane.url) },
+    { type: 'separator' },
+    { label: text('Quit SSH Manager'), click: () => app.quit() },
+  );
+
+  tray.setContextMenu(Menu.buildFromTemplate(template));
+  tray.setToolTip(pending.length
+    ? text('SSH Manager — {{v0}} waiting for your decision', { v0: pending.length })
+    : 'SSH Manager');
+
+  // The count beside the icon, and on the dock. Only when it is not zero: a
+  // permanent "0" is a thing people learn to stop reading.
+  if (process.platform === 'darwin') {
+    tray.setTitle(pending.length ? ` ${pending.length}` : '');
+    app.dock?.setBadge(pending.length ? String(pending.length) : '');
+  }
+}
+
+/**
+ * Updates, offered rather than applied.
+ *
+ * This application holds SSH connections and the approval socket an agent is
+ * blocked on. Downloading 120 MB on somebody's tethered connection because a
+ * release happened, or restarting under them while a transfer is running, are
+ * both worse than being a version behind for an afternoon.
+ *
+ * So: it checks, and says so — in the window (Options → Updates, and a mark on
+ * the sidebar), in the menu bar, and once per version in a notification.
+ * Downloading is a click. Installing happens when the application is closed
+ * anyway, or when you choose to restart — never in the middle of something.
+ */
+function setupUpdater() {
+  // A candidate preview must keep the artifact the operator chose to test.
+  if (previewHome) return;
+  const { autoUpdater } = electronUpdater;
+  if (!app.isPackaged) return;          // no feed, and no version to compare
+
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.logger = null;
+  updaterActive = true;
+
+  const move = (status, extra = {}) => {
+    update = { ...update, status, ...extra };
+    trayState = '';                     // force the menu to rebuild
+    refreshTray();
+    const snapshot = updateSnapshot();
+    for (const listener of updateListeners) listener(snapshot);
+  };
+  const now = () => new Date().toISOString();
+
+  autoUpdater.on('checking-for-update', () => move('checking', { error: null }));
+  autoUpdater.on('update-available', info => {
+    move('available', { version: info.version, percent: 0, checkedAt: now(), error: null });
+    announceUpdate(info.version);
+  });
+  autoUpdater.on('update-not-available', () => move('idle', { version: null, checkedAt: now(), error: null }));
+  autoUpdater.on('download-progress', p => move('downloading', { percent: Math.round(p.percent) }));
+  autoUpdater.on('update-downloaded', info => move('ready', { version: info.version, percent: 100 }));
+  autoUpdater.on('error', error => {
+    // A failed background check is not worth an alert: the network is down, or
+    // GitHub is, and it will try again. The reason is kept for Options → Updates,
+    // where someone who asked to check can read it. A failed download goes back
+    // to "available", so it can be tried again.
+    const message = String(error?.message || error).split('\n')[0].slice(0, 200);
+    move(update.status === 'downloading' || update.status === 'ready' ? 'available' : 'idle', { checkedAt: now(), error: message });
+  });
+
+  const check = () => autoUpdater.checkForUpdates().catch(() => { /* see above */ });
+  setTimeout(check, 8000);              // not during launch, when it would compete
+  const timer = setInterval(check, 6 * 60 * 60 * 1000);
+  timer.unref();
+}
+
+/**
+ * Say, once per version, that an update is on offer.
+ *
+ * The version is remembered on disk: a notification at every launch for an
+ * update somebody has already decided to leave for later is nagging, and
+ * the sidebar and the menu bar keep showing it anyway.
+ *
+ * @param {string} version
+ */
+function announceUpdate(version) {
+  const marker = path.join(app.getPath('userData'), 'last-update-notice');
+  try {
+    if (fs.readFileSync(marker, 'utf8').trim() === version) return;
+  } catch { /* nothing recorded yet */ }
+  try { fs.writeFileSync(marker, `${version}\n`); } catch { /* it will say it again next time; harmless */ }
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({
+    title: text('SSH Manager {{v0}} is available', { v0: version }),
+    body: text('Open Options → Updates to download it. Nothing is installed until you restart.'),
+    silent: true,
+  });
+  notification.on('click', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    } else if (plane) {
+      createWindow(plane.url);
+    }
+  });
+  notification.show();
+}
+
+/** The menu-bar entry for whatever the updater is up to, or nothing. */
+function updateMenuItems() {
+  const { autoUpdater } = electronUpdater;
+  switch (update.status) {
+  case 'checking':
+    return [{ label: text('Checking for updates…'), enabled: false }, { type: 'separator' }];
+  case 'available':
+    return [{
+      label: text('Update to {{v0}}', { v0: update.version }),
+      click: () => autoUpdater.downloadUpdate().catch(() => { /* reported by the error handler */ }),
+    }, { type: 'separator' }];
+  case 'downloading':
+    return [{ label: text('Downloading update… {{v0}}%', { v0: update.percent }), enabled: false },
+      { type: 'separator' }];
+  case 'ready':
+    return [{
+      label: text('Restart to update to {{v0}}', { v0: update.version }),
+      click: () => autoUpdater.quitAndInstall(),
+    }, { type: 'separator' }];
+  default:
+    return updaterActive
+      ? [{ label: text('Check for Updates…'), click: () => void appUpdates.check().catch(() => { /* shown in Options → Updates */ }) },
+        { type: 'separator' }]
+      : [];
+  }
+}
+
+function createTray() {
+  const iconPath = path.join(__dirname, 'resources', 'trayTemplate.png');
+  const icon = nativeImage.createFromPath(iconPath);
+  if (icon.isEmpty()) {
+    // A missing icon throws inside `new Tray` on macOS and would take the whole
+    // app down over a packaging mistake — which is exactly what happened: the
+    // first packaged build had no trayTemplate.png, because `resources` is
+    // buildResources and electron-builder leaves that out of the asar.
+    console.error(`No menu-bar icon at ${iconPath}; continuing without it.`);
+    return;
+  }
+  // macOS repaints template images for the current bar; without this the glyph
+  // is a black square on a dark menu bar.
+  icon.setTemplateImage(true);
+  tray = new Tray(icon);
+  tray.setToolTip('SSH Manager');
+  // Clicking the icon itself opens the menu on macOS; elsewhere it is expected
+  // to raise the window, and the menu is on right-click.
+  if (process.platform !== 'darwin') {
+    tray.on('click', () => {
+      if (mainWindow) mainWindow.show();
+      else if (plane) createWindow(plane.url);
+    });
+  }
+  refreshTray();
+  // Two seconds: fast enough that a blocked agent is visible almost at once,
+  // slow enough to be free. It reads four in-memory collections.
+  const timer = setInterval(refreshTray, 2000);
+  app.on('before-quit', () => clearInterval(timer));
+}
+
+// Windows ties a notification to an Application User Model ID. Without one,
+// notifications from a packaged Electron app either do not appear at all or
+// appear attributed to "electron.app.Electron" — and the approval feature is
+// built on the assumption that the person is told when an agent is blocked.
+// This must match `appId` in electron-builder.yml or the toast is orphaned.
+if (process.platform === 'win32') app.setAppUserModelId('com.bvisible.ssh-manager');
+
+/**
+ * Files dropped on the Dock icon.
+ *
+ * macOS delivers these as `open-file`, and it delivers them *early* — before
+ * `whenReady`, if somebody dropped a file on a cold icon and that is what
+ * launched the app. So they are collected here and flushed once there is
+ * something to flush them into; dropping the event on the floor because the
+ * window was not up yet is the classic way this feature half-works.
+ *
+ * What happens to them is the page's decision, not this process's: it knows
+ * which servers are open, which shells are running, and which remote directory
+ * is on screen. All that happens here is that it gets told.
+ */
+const droppedFiles = [];
+
+function flushDroppedFiles() {
+  if (!plane || droppedFiles.length === 0) return;
+  const paths = droppedFiles.splice(0, droppedFiles.length);
+  plane.announce({ type: 'dropped-files', paths });
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+}
+
+app.on('open-file', (event, filePath) => {
+  event.preventDefault();
+  droppedFiles.push(filePath);
+  // Several files arrive as several events in quick succession; coalesce them
+  // so the page asks one question about five files rather than five questions.
+  setTimeout(flushDroppedFiles, 120);
+});
+
+// One copy at a time. A second launch — a double-click on the icon, or
+// `ssh-manager app` on Windows and Linux, where opening an application starts
+// another process — would bind the approval socket again and fight the first
+// copy for it. It brings the running window forward instead. Not for a smoke
+// test or a preview, which run beside a real copy on purpose, in a home of
+// their own.
+const soleCopy = smokeTest || previewHome || app.requestSingleInstanceLock();
+if (!soleCopy) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    } else if (plane) {
+      createWindow(plane.url);
+    }
+  });
+}
+
+app.whenReady().then(async () => {
+  if (!soleCopy) return;
+  try {
+    const { url } = await startControlPlane();
+    if (smokeTest) {
+      const { runSmokeTest } = await import('./smoke-test.mjs');
+      await runSmokeTest({ app, BrowserWindow, Menu, url, root: engineRoot(), localShellProvider });
+      app.quit();
+      return;
+    }
+    buildMenu(url);
+    createWindow(url);
+    createTray();
+    setupUpdater();
+    // Anything dropped before the window existed.
+    setTimeout(flushDroppedFiles, 500);
+  } catch (error) {
+    if (smokeTest) {
+      fs.writeFileSync(process.env.SSH_RELEASE_SMOKE_RESULT, JSON.stringify({ ok: false, error: error.message }));
+      app.exit(1);
+      return;
+    }
+    // A failure here means no interface at all, so it is a dialog rather than a
+    // line in a log nobody is reading — most often an over-long socket path or
+    // another copy already running.
+    // The hint has to match the failure. A packaged build once shipped without
+    // its dependencies and died on "Cannot find package 'dotenv'" — while this
+    // box confidently suggested another copy was running, which sent the reader
+    // looking in the wrong place entirely.
+    const guess = /Cannot find (package|module)/i.test(error.message)
+      ? text('The application is missing part of itself. This is a packaging fault, '
+        + 'not something you can fix here — please report it with this message.')
+      : error.code === 'EADDRINUSE' || /already running|EADDRINUSE/i.test(error.message)
+        ? text('Another copy is already running, or a stale socket is in the way.')
+        : text('The socket path may be too long for this system, or the port could '
+          + 'not be opened.');
+    dialog.showErrorBox(text('SSH Manager could not start'), `${error.message}\n\n${guess}`);
+    app.quit();
+  }
+
+  app.on('activate', async () => {
+    if (BrowserWindow.getAllWindows().length === 0 && plane) {
+      createWindow(plane.url);
+    }
+  });
+});
+
+// On macOS, closing the window leaves the app in the menu bar. Everywhere else
+// it quits.
+//
+// This used to quit on every platform, and the reason was sound at the time:
+// leaving the control plane running with no window means a process holding SSH
+// connections that nobody can see — and worse, holding the approval socket, so
+// agents block on an interface that is not on screen.
+//
+// The tray is exactly the thing that was missing. It shows the connections, it
+// shows what is waiting, and it carries a Quit. The invisible-process objection
+// no longer applies, and quitting a menu-bar app because its window closed is
+// not what a macOS user expects.
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', async event => {
+  if (tray) { tray.destroy(); tray = null; }
+  if (!plane) return;
+  event.preventDefault();
+  const closing = plane;
+  plane = null;
+  try {
+    await closing.stop();
+  } catch {
+    // Shutting down is best effort; failing to release a socket must not stop
+    // the app from exiting.
+  }
+  app.quit();
+});
