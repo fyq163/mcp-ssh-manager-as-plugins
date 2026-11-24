@@ -1,0 +1,10 @@
+{
+  "name": "mcp-ssh-manager-opencode",
+  "type": "module",
+  "exports": {
+    ".": "./server.js",
+    "./server": "./server.js",
+    "./tui": "./tui.js",
+    "./rpc": "./rpc.js"
+  }
+}
