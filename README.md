@@ -1157,79 +1157,66 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🟢 OpenCode
 
-`mcp-ssh-manager` ships an **OpenCode plugin** (the same package, the
-`exports["./server"]` entrypoint) that bridges all 37 MCP tools into
-OpenCode's native plugin tool interface. This means a **single
-`plugin` entry** is all that's needed — no separate `mcp` config block
-required.
+`mcp-ssh-manager` ships an OpenCode **V2 plugin package** that bridges its MCP
+tools into OpenCode's native tool interface. Its server part registers the
+tools and an `execute.before` hook; the TUI part displays the SSH reminder
+toast through a small plugin RPC event. The tools and hook are installed
+together — no separate MCP config block or hook setup is needed.
 
-### Option A — open the submodule directory directly
+### Option A — open this repository directly
 
 ```bash
-cd plugins/codex-plugin-ssh-manager  # or the cloned standalone repo
+cd plugins/codex-plugin-ssh-manager
 opencode
 ```
 
-OpenCode auto-discovers `.opencode/plugins/*.js` in the project root, so
-the bridge plugin loads with no further configuration.
+OpenCode discovers `.opencode/plugins/mcp-ssh-manager/` as a local plugin
+package. The repository's `node_modules` must be installed first.
 
 ### Option B — one-liner install (recommended)
 
-The plugin can be installed with a single command — no npm publish
-required, no `file:///` in your config, no MCP entry to maintain:
+Install globally with one command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fyq163/mcp-ssh-manager-as-plugins/codex-oc-plugins/scripts/install-opencode.sh | bash
 ```
 
-This downloads `mcp-ssh-manager.js` into
-`~/.config/opencode/plugins/`. OpenCode auto-loads everything in that
-directory at startup, so the 37 SSH tools become available immediately.
-The installer records the absolute Node executable it finds at install time in
-`mcp-ssh-manager.config.json`. The plugin uses that saved path when starting
-its MCP server, even if OpenCode later starts with a different `PATH`.
+The installer downloads the four OpenCode package files into
+`~/.config/opencode/plugins/mcp-ssh-manager/` and records the absolute Node
+executable. The small V2 plugin package has no npm dependencies; it starts the
+MCP server with `npx` and OpenCode loads the server and TUI parts together. The
+TUI part displays a toast when Bash is about to run a raw `ssh` command.
+Existing single-file V1 installs are backed up outside the plugin directory so
+they cannot keep loading and failing.
 
-Uninstall:
+Disable the install (files are backed up, not deleted):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fyq163/mcp-ssh-manager-as-plugins/codex-oc-plugins/scripts/install-opencode.sh | bash -s -- --uninstall
 ```
 
-Or, with a specific branch/tag:
+To install a different branch or tag:
 
 ```bash
-VERSION=v3.8.6 ./install-opencode.sh
 ./install-opencode.sh --branch main
-./install-opencode.sh --dest /custom/path/mcp-ssh-manager.js
+VERSION=v3.8.6 ./install-opencode.sh
+./install-opencode.sh --dest /custom/path/mcp-ssh-manager
 ```
 
-### Option C — install from npm
+### Option C — install from Git
 
-Add to `~/.config/opencode/opencode.jsonc`:
+OpenCode can also install the package directly:
 
-```jsonc
-"plugin": [
-  "mcp-ssh-manager"
-]
+```bash
+opencode plugin add github:fyq163/mcp-ssh-manager-as-plugins#codex-oc-plugins
 ```
 
-The package is fetched by Bun on first start (requires publishing to npm
-first; this is the model used once `mcp-ssh-manager` v3.8.6+ is
-released on npm).
-
-### Local development install (no npm publish)
-
-For testing before a release, point OpenCode at the local plugin file:
-
-```jsonc
-"plugin": [
-  "file:///absolute/path/to/plugins/codex-plugin-ssh-manager/.opencode/plugins/mcp-ssh-manager.js"
-]
-```
+For an install with a captured absolute Node path and a local copy of the MCP
+server, use the one-line installer above.
 
 ### Server config
 
-The bridge plugin forwards `SSH_CONFIG_PATH` (or defaults to
+The bridge forwards `SSH_CONFIG_PATH` (or defaults to
 `~/.config/mcp-ssh-manager/ssh-config.toml`) to the spawned MCP server.
 Server definitions are read (in precedence order) from:
 
@@ -1245,8 +1232,8 @@ export SSH_CONFIG_PATH=~/.codex/ssh-config.toml
 ```
 
 The one-line installer records the Node executable automatically. For local
-development or npm-based installs that do not use that installer, you can
-override the Node path with `MCP_SSH_MANAGER_NODE`:
+development or package-manager installs that do not use that installer, you
+can override the Node path with `MCP_SSH_MANAGER_NODE`:
 
 ```bash
 MCP_SSH_MANAGER_NODE="$(command -v node)" opencode
@@ -1258,7 +1245,6 @@ override the path saved by the installer.
 ### Usage
 
 With the plugin enabled, ask OpenCode:
-ask OpenCode:
 
 - "List my SSH servers"
 - "Run df -h on production"
@@ -1266,8 +1252,8 @@ ask OpenCode:
 - "Backup production MySQL database"
 
 > **Note:** OpenCode plugins are JS/TS event hooks, distinct from MCP
-> servers. The "remind before raw ssh" nudge hook (ported from the Codex
-  `prompt_mcp_ssh.py`) is tracked for a future release.
+> servers. The raw-SSH reminder is a V2 `tool.execute.before` hook; a
+> server-side RPC event carries it to the TUI plugin, which displays the toast.
 
 ---
 
