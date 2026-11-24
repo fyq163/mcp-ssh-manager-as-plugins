@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
-import { createSSHNudgeHook, isRawSshCommand, MCPSSHManagerPlugin } from "../.opencode/plugins/mcp-ssh-manager/server.js";
+import { createSSHNudgeHook, findGlobalMcpEntry, isRawSshCommand, MCPSSHManagerPlugin } from "../.opencode/plugins/mcp-ssh-manager/server.js";
 import TuiPlugin from "../.opencode/plugins/mcp-ssh-manager/tui.js";
 import { MCPSSHManagerRpc } from "../.opencode/plugins/mcp-ssh-manager/rpc.js";
 
@@ -113,4 +116,21 @@ test("RPC contract describes the SSH reminder event", () => {
     "message",
     "sessionID",
   ]);
+});
+
+test("global MCP entry resolves a PATH symlink even without exec bit", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-ssh-manager-bin-"));
+  const entry = path.join(dir, "server.js");
+  fs.writeFileSync(entry, "// test entry\n", { mode: 0o644 });
+  fs.symlinkSync(entry, path.join(dir, "mcp-ssh-manager"));
+
+  try {
+    assert.equal(
+      findGlobalMcpEntry(`${dir}${path.delimiter}/nowhere`),
+      fs.realpathSync(entry),
+    );
+    assert.equal(findGlobalMcpEntry("/nowhere"), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

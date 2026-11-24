@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import os from "node:os";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MCPSSHManagerRpc } from "./rpc.js";
@@ -16,6 +16,26 @@ function findMcpServerEntry() {
     join(pluginDir, "src", "index.js"),
   ];
   return candidates.find((candidate) => existsSync(candidate)) || null;
+}
+
+// A globally installed `mcp-ssh-manager` bin is usually a symlink to a JS
+// file. Run that file with node directly instead of executing the bin via
+// npx: a global install whose entry lost its executable bit would otherwise
+// fail with EACCES/126. Node resolution still finds the package's own
+// dependencies because the script keeps its real path.
+export function findGlobalMcpEntry(pathValue) {
+  for (const dir of (pathValue || "").split(delimiter)) {
+    if (!dir) continue;
+    const bin = join(dir, "mcp-ssh-manager");
+    try {
+      if (!existsSync(bin)) continue;
+      const entry = realpathSync(bin);
+      if (/\.(?:js|mjs|cjs)$/.test(entry) && existsSync(entry)) return entry;
+    } catch {
+      // Skip broken symlinks and unreadable paths.
+    }
+  }
+  return null;
 }
 
 function loadInstalledConfig() {
@@ -129,6 +149,11 @@ class MCPBridge {
     const entry = findMcpServerEntry();
     if (entry) {
       return { command: this.getNodeCommand(), args: [entry] };
+    }
+
+    const globalEntry = findGlobalMcpEntry(this.getEnv().PATH);
+    if (globalEntry) {
+      return { command: this.getNodeCommand(), args: [globalEntry] };
     }
 
     return { command: "npx", args: ["-y", "mcp-ssh-manager"] };
